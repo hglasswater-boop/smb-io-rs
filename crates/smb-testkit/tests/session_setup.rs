@@ -1,9 +1,7 @@
-use smb_io_auth::{
-    AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, SecretBytes,
-};
+use smb_io_auth::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, SecretBytes};
 use smb_io_client::{
-    Connection, Dialect, NegotiateConfig, SessionSetupConfig, STATUS_MORE_PROCESSING_REQUIRED,
-    STATUS_SUCCESS,
+    Connection, Dialect, NegotiateConfig, STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS,
+    SessionSetupConfig,
 };
 use smb_io_testkit::ScriptedTransport;
 use smb_io_wire::{
@@ -164,12 +162,7 @@ async fn multi_round_session_setup_reuses_server_session_id_and_extends_preauth_
 async fn server_cannot_change_session_id_mid_exchange() {
     let transport = ScriptedTransport::new([
         negotiate_311_response(),
-        session_response(
-            1,
-            0xAA,
-            STATUS_MORE_PROCESSING_REQUIRED,
-            b"challenge-token",
-        ),
+        session_response(1, 0xAA, STATUS_MORE_PROCESSING_REQUIRED, b"challenge-token"),
         session_response(2, 0xBB, STATUS_SUCCESS, &[]),
     ]);
 
