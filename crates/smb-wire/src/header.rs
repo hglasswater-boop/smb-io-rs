@@ -1,5 +1,5 @@
-use crate::error::{WireError, require_len};
 use crate::SMB2_PROTOCOL_ID;
+use crate::error::{WireError, require_len};
 
 pub const SMB2_HEADER_SIZE: usize = 64;
 pub const SMB2_HEADER_STRUCTURE_SIZE: u16 = 64;
@@ -97,7 +97,12 @@ pub struct Smb2Header {
 }
 
 impl Smb2Header {
-    pub fn request(command: Command, message_id: u64, credit_charge: u16, credit_request: u16) -> Self {
+    pub fn request(
+        command: Command,
+        message_id: u64,
+        credit_charge: u16,
+        credit_request: u16,
+    ) -> Self {
         Self {
             credit_charge,
             status: StatusField::ChannelSequence {
@@ -136,7 +141,10 @@ impl Smb2Header {
         put_u32(&mut out, 20, self.next_command);
         put_u64(&mut out, 24, self.message_id);
         match self.id {
-            HeaderId::Sync { process_id, tree_id } => {
+            HeaderId::Sync {
+                process_id,
+                tree_id,
+            } => {
                 put_u32(&mut out, 32, process_id);
                 put_u32(&mut out, 36, tree_id);
             }
