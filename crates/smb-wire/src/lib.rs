@@ -10,6 +10,7 @@ mod error;
 mod frame;
 mod header;
 mod negotiate;
+mod session_setup;
 
 pub use error::WireError;
 pub use frame::{
@@ -23,6 +24,11 @@ pub use negotiate::{
     Dialect, NEGOTIATE_REQUEST_STRUCTURE_SIZE, NEGOTIATE_RESPONSE_FIXED_SIZE,
     NEGOTIATE_RESPONSE_STRUCTURE_SIZE, NegotiateContext, NegotiateRequest, NegotiateResponse,
     capabilities, context_type, preauth_hash_algorithm, security_mode,
+};
+pub use session_setup::{
+    SESSION_SETUP_REQUEST_FIXED_SIZE, SESSION_SETUP_REQUEST_STRUCTURE_SIZE,
+    SESSION_SETUP_RESPONSE_FIXED_SIZE, SESSION_SETUP_RESPONSE_STRUCTURE_SIZE, SessionSetupRequest,
+    SessionSetupResponse, request_flags, session_flags,
 };
 
 /// SMB2 protocol identifier (`0xFE 'S' 'M' 'B'`).
