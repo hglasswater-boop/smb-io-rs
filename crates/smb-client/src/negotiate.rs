@@ -3,7 +3,9 @@ use smb_io_wire::{
     capabilities, context_type, preauth_hash_algorithm, security_mode,
 };
 
-use crate::{ClientError, MessageIdAllocator, PreauthIntegrityHash, Transport};
+use crate::{
+    ClientError, MessageIdAllocator, PreauthIntegrityHash, SigningAlgorithm, Transport,
+};
 
 #[derive(Debug, Clone)]
 pub struct NegotiateConfig {
@@ -13,6 +15,9 @@ pub struct NegotiateConfig {
     pub client_guid: [u8; 16],
     /// Caller-provided random salt for the SMB 3.1.1 preauthentication context.
     pub preauth_salt: Vec<u8>,
+    /// SMB 3.1.1 signing algorithms in preference order. Unsupported algorithms must not be
+    /// advertised. Pre-SMB3.1.1 dialects use their fixed signing algorithm regardless of this list.
+    pub signing_algorithms: Vec<SigningAlgorithm>,
     pub credit_request: u16,
 }
 
@@ -30,6 +35,10 @@ impl NegotiateConfig {
             capabilities: capabilities::LARGE_MTU,
             client_guid,
             preauth_salt,
+            signing_algorithms: vec![
+                SigningAlgorithm::AesCmac,
+                SigningAlgorithm::HmacSha256,
+            ],
             credit_request: 64,
         }
     }
@@ -41,7 +50,13 @@ impl NegotiateConfig {
                     "SMB 3.1.1 negotiation requires a non-empty preauth salt",
                 ));
             }
-            vec![NegotiateContext::preauth_sha512(self.preauth_salt.clone())?]
+            let mut contexts = vec![NegotiateContext::preauth_sha512(
+                self.preauth_salt.clone(),
+            )?];
+            if !self.signing_algorithms.is_empty() {
+                contexts.push(signing_capabilities_context(&self.signing_algorithms)?);
+            }
+            contexts
         } else {
             Vec::new()
         };
@@ -65,6 +80,8 @@ pub struct NegotiatedParameters {
     pub max_read_size: u32,
     pub max_write_size: u32,
     pub initial_credits: u16,
+    pub signing_algorithm: SigningAlgorithm,
+    pub require_signing: bool,
 }
 
 impl NegotiatedParameters {
@@ -73,7 +90,7 @@ impl NegotiatedParameters {
     }
 
     pub fn signing_required(&self) -> bool {
-        self.security_mode & security_mode::SIGNING_REQUIRED != 0
+        self.require_signing
     }
 }
 
@@ -166,6 +183,14 @@ where
             None
         };
 
+        let signing_algorithm = select_signing_algorithm(
+            response.dialect,
+            &response.contexts,
+            &config.signing_algorithms,
+        )?;
+        let require_signing = response.security_mode & security_mode::SIGNING_REQUIRED != 0
+            || config.security_mode & security_mode::SIGNING_REQUIRED != 0;
+
         let parameters = NegotiatedParameters {
             dialect: response.dialect,
             security_mode: response.security_mode,
@@ -175,6 +200,8 @@ where
             max_read_size: response.max_read_size,
             max_write_size: response.max_write_size,
             initial_credits: response.header.credits,
+            signing_algorithm,
+            require_signing,
         };
         if parameters.max_transact_size == 0
             || parameters.max_read_size == 0
@@ -193,13 +220,90 @@ where
     }
 }
 
-fn validate_server_preauth_sha512(contexts: &[NegotiateContext]) -> Result<(), ClientError> {
-    let context = contexts
+fn signing_capabilities_context(
+    algorithms: &[SigningAlgorithm],
+) -> Result<NegotiateContext, ClientError> {
+    let count = u16::try_from(algorithms.len())
+        .map_err(|_| ClientError::Protocol("too many SMB signing algorithms"))?;
+    if count == 0 {
+        return Err(ClientError::Protocol(
+            "SMB signing capabilities must contain an algorithm",
+        ));
+    }
+    if algorithms.contains(&SigningAlgorithm::AesGmac) {
+        return Err(ClientError::Protocol(
+            "AES-GMAC must not be advertised until it is implemented",
+        ));
+    }
+
+    let mut data = Vec::with_capacity(2 + algorithms.len() * 2);
+    data.extend_from_slice(&count.to_le_bytes());
+    for algorithm in algorithms {
+        data.extend_from_slice(&(*algorithm as u16).to_le_bytes());
+    }
+    Ok(NegotiateContext {
+        context_type: context_type::SIGNING_CAPABILITIES,
+        data,
+    })
+}
+
+fn select_signing_algorithm(
+    dialect: Dialect,
+    contexts: &[NegotiateContext],
+    offered: &[SigningAlgorithm],
+) -> Result<SigningAlgorithm, ClientError> {
+    match dialect {
+        Dialect::Smb202 | Dialect::Smb210 => return Ok(SigningAlgorithm::HmacSha256),
+        Dialect::Smb300 | Dialect::Smb302 => return Ok(SigningAlgorithm::AesCmac),
+        Dialect::Smb311 => {}
+    }
+
+    let mut matches = contexts
         .iter()
-        .find(|context| context.context_type == context_type::PREAUTH_INTEGRITY_CAPABILITIES)
-        .ok_or(ClientError::Protocol(
-            "SMB 3.1.1 response omitted preauth integrity capabilities",
-        ))?;
+        .filter(|context| context.context_type == context_type::SIGNING_CAPABILITIES);
+    let Some(context) = matches.next() else {
+        return Ok(SigningAlgorithm::AesCmac);
+    };
+    if matches.next().is_some() {
+        return Err(ClientError::Protocol(
+            "SMB 3.1.1 response contains duplicate signing capabilities",
+        ));
+    }
+    if context.data.len() < 4 {
+        return Err(ClientError::Protocol(
+            "SMB 3.1.1 signing capabilities are truncated",
+        ));
+    }
+    let count = usize::from(u16::from_le_bytes([context.data[0], context.data[1]]));
+    if count != 1 {
+        return Err(ClientError::Protocol(
+            "SMB 3.1.1 server must select exactly one signing algorithm",
+        ));
+    }
+    let selected = SigningAlgorithm::try_from(u16::from_le_bytes([
+        context.data[2],
+        context.data[3],
+    ]))?;
+    if !offered.contains(&selected) {
+        return Err(ClientError::Protocol(
+            "server selected an SMB signing algorithm that was not offered",
+        ));
+    }
+    Ok(selected)
+}
+
+fn validate_server_preauth_sha512(contexts: &[NegotiateContext]) -> Result<(), ClientError> {
+    let mut matches = contexts
+        .iter()
+        .filter(|context| context.context_type == context_type::PREAUTH_INTEGRITY_CAPABILITIES);
+    let context = matches.next().ok_or(ClientError::Protocol(
+        "SMB 3.1.1 response omitted preauth integrity capabilities",
+    ))?;
+    if matches.next().is_some() {
+        return Err(ClientError::Protocol(
+            "SMB 3.1.1 response contains duplicate preauth integrity capabilities",
+        ));
+    }
     if context.data.len() < 6 {
         return Err(ClientError::Protocol(
             "SMB 3.1.1 preauth integrity context is truncated",
@@ -241,12 +345,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modern_config_offers_all_initial_dialects() {
+    fn modern_config_offers_all_initial_dialects_and_signing_context() {
         let config = NegotiateConfig::modern([1; 16], vec![2; 32]);
         assert_eq!(config.dialects.first(), Some(&Dialect::Smb202));
         assert_eq!(config.dialects.last(), Some(&Dialect::Smb311));
         let request = config.request().unwrap();
-        assert_eq!(request.contexts.len(), 1);
+        assert_eq!(request.contexts.len(), 2);
+        assert!(request
+            .contexts
+            .iter()
+            .any(|context| context.context_type == context_type::SIGNING_CAPABILITIES));
     }
 
     #[test]
@@ -262,5 +370,35 @@ mod tests {
             data: vec![1, 0, 0, 0, 2, 0],
         };
         assert!(validate_server_preauth_sha512(&[context]).is_err());
+    }
+
+    #[test]
+    fn smb311_defaults_to_cmac_when_server_omits_signing_context() {
+        assert_eq!(
+            select_signing_algorithm(
+                Dialect::Smb311,
+                &[],
+                &[SigningAlgorithm::AesCmac, SigningAlgorithm::HmacSha256]
+            )
+            .unwrap(),
+            SigningAlgorithm::AesCmac
+        );
+    }
+
+    #[test]
+    fn smb311_accepts_offered_signing_algorithm() {
+        let context = NegotiateContext {
+            context_type: context_type::SIGNING_CAPABILITIES,
+            data: vec![1, 0, 0, 0],
+        };
+        assert_eq!(
+            select_signing_algorithm(
+                Dialect::Smb311,
+                &[context],
+                &[SigningAlgorithm::AesCmac, SigningAlgorithm::HmacSha256]
+            )
+            .unwrap(),
+            SigningAlgorithm::HmacSha256
+        );
     }
 }
