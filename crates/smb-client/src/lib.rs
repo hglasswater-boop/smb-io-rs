@@ -11,6 +11,7 @@ mod message_id;
 mod negotiate;
 mod preauth;
 mod session;
+mod signing;
 mod transport;
 
 pub use error::ClientError;
@@ -20,5 +21,6 @@ pub use preauth::PreauthIntegrityHash;
 pub use session::{
     STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
 };
+pub use signing::{SigningAlgorithm, SigningState};
 pub use smb_io_wire::Dialect;
 pub use transport::{TcpTransport, TcpTransportConfig, Transport};
