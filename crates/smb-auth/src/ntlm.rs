@@ -7,9 +7,7 @@ use md4::{Digest as _, Md4};
 use md5::Md5;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::spnego::{
-    encode_neg_token_init_ntlm, encode_neg_token_resp_ntlm, extract_ntlm_token,
-};
+use crate::spnego::{encode_neg_token_init_ntlm, encode_neg_token_resp_ntlm, extract_ntlm_token};
 use crate::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, SecretBytes};
 
 const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
@@ -48,9 +46,8 @@ const CLIENT_NEGOTIATE_FLAGS: u32 = flags::NEGOTIATE_UNICODE
     | flags::NEGOTIATE_TARGET_INFO
     | flags::NEGOTIATE_128
     | flags::NEGOTIATE_56;
-const REQUIRED_CHALLENGE_FLAGS: u32 = flags::NEGOTIATE_UNICODE
-    | flags::NEGOTIATE_NTLM
-    | flags::NEGOTIATE_EXTENDED_SESSIONSECURITY;
+const REQUIRED_CHALLENGE_FLAGS: u32 =
+    flags::NEGOTIATE_UNICODE | flags::NEGOTIATE_NTLM | flags::NEGOTIATE_EXTENDED_SESSIONSECURITY;
 
 /// NTLM credentials. Password memory is zeroized on drop and never rendered by `Debug`.
 pub struct NtlmCredentials {
@@ -290,9 +287,8 @@ fn build_authenticate_message(
     session_key.copy_from_slice(computed.session_base_key.as_ref());
 
     if include_mic {
-        let mut transcript = Vec::with_capacity(
-            negotiate_message.len() + challenge_message.len() + message.len(),
-        );
+        let mut transcript =
+            Vec::with_capacity(negotiate_message.len() + challenge_message.len() + message.len());
         transcript.extend_from_slice(negotiate_message);
         transcript.extend_from_slice(challenge_message);
         transcript.extend_from_slice(&message);
@@ -314,7 +310,11 @@ fn compute_ntlmv2_response(
     let mut nt_hash = Zeroizing::new([0u8; 16]);
     nt_hash.copy_from_slice(&nt_digest);
 
-    let identity = format!("{}{}", credentials.username.to_uppercase(), credentials.domain);
+    let identity = format!(
+        "{}{}",
+        credentials.username.to_uppercase(),
+        credentials.domain
+    );
     let identity_utf16 = utf16le(&identity);
     let response_key = Zeroizing::new(hmac_md5(nt_hash.as_ref(), &identity_utf16)?);
 
@@ -381,7 +381,9 @@ fn validate_target_info(target_info: &[u8]) -> Result<TargetInfoMeta, AuthError>
             .checked_add(length)
             .ok_or(AuthError::InvalidToken("NTLM TargetInfo length overflow"))?;
         if end > target_info.len() {
-            return Err(AuthError::InvalidToken("NTLM TargetInfo AV pair is truncated"));
+            return Err(AuthError::InvalidToken(
+                "NTLM TargetInfo AV pair is truncated",
+            ));
         }
         let value = &target_info[offset..end];
         match id {
@@ -400,8 +402,7 @@ fn validate_target_info(target_info: &[u8]) -> Result<TargetInfoMeta, AuthError>
             }
             av_id::TIMESTAMP if length == 8 => {
                 meta.timestamp = Some(u64::from_le_bytes([
-                    value[0], value[1], value[2], value[3], value[4], value[5], value[6],
-                    value[7],
+                    value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
                 ]));
             }
             av_id::FLAGS => {
@@ -418,7 +419,9 @@ fn validate_target_info(target_info: &[u8]) -> Result<TargetInfoMeta, AuthError>
         }
     }
     if !saw_eol {
-        return Err(AuthError::InvalidToken("NTLM TargetInfo is missing MsvAvEOL"));
+        return Err(AuthError::InvalidToken(
+            "NTLM TargetInfo is missing MsvAvEOL",
+        ));
     }
     Ok(meta)
 }
@@ -462,12 +465,12 @@ fn read_security_buffer(message: &[u8], field_offset: usize) -> Result<&[u8], Au
     }
     let start = usize::try_from(read_u32(message, field_offset + 4)?)
         .map_err(|_| AuthError::InvalidToken("NTLM security buffer offset overflow"))?;
-    let end = start
-        .checked_add(length)
-        .ok_or(AuthError::InvalidToken("NTLM security buffer length overflow"))?;
-    message
-        .get(start..end)
-        .ok_or(AuthError::InvalidToken("NTLM security buffer points outside message"))
+    let end = start.checked_add(length).ok_or(AuthError::InvalidToken(
+        "NTLM security buffer length overflow",
+    ))?;
+    message.get(start..end).ok_or(AuthError::InvalidToken(
+        "NTLM security buffer points outside message",
+    ))
 }
 
 fn append_security_buffer(
@@ -495,7 +498,9 @@ fn set_security_buffer(
         .checked_add(8)
         .is_none_or(|end| end > message.len())
     {
-        return Err(AuthError::Failed("NTLM security-buffer header is truncated"));
+        return Err(AuthError::Failed(
+            "NTLM security-buffer header is truncated",
+        ));
     }
     message[field_offset..field_offset + 2].copy_from_slice(&length.to_le_bytes());
     message[field_offset + 2..field_offset + 4].copy_from_slice(&length.to_le_bytes());
@@ -544,9 +549,9 @@ mod tests {
 
     fn spec_target_info() -> Vec<u8> {
         vec![
-            0x02, 0x00, 0x0c, 0x00, 0x44, 0x00, 0x6f, 0x00, 0x6d, 0x00, 0x61, 0x00, 0x69,
-            0x00, 0x6e, 0x00, 0x01, 0x00, 0x0c, 0x00, 0x53, 0x00, 0x65, 0x00, 0x72, 0x00,
-            0x76, 0x00, 0x65, 0x00, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x0c, 0x00, 0x44, 0x00, 0x6f, 0x00, 0x6d, 0x00, 0x61, 0x00, 0x69, 0x00,
+            0x6e, 0x00, 0x01, 0x00, 0x0c, 0x00, 0x53, 0x00, 0x65, 0x00, 0x72, 0x00, 0x76, 0x00,
+            0x65, 0x00, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00,
         ]
     }
 
@@ -560,8 +565,8 @@ mod tests {
         assert_eq!(
             response_key,
             [
-                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e,
-                0xf0, 0x2e, 0x3f,
+                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0,
+                0x2e, 0x3f,
             ]
         );
     }
@@ -584,15 +589,15 @@ mod tests {
         assert_eq!(
             &response.nt_response[..16],
             &[
-                0x68, 0xcd, 0x0a, 0xb8, 0x51, 0xe5, 0x1c, 0x96, 0xaa, 0xbc, 0x92, 0x7b, 0xeb,
-                0xef, 0x6a, 0x1c,
+                0x68, 0xcd, 0x0a, 0xb8, 0x51, 0xe5, 0x1c, 0x96, 0xaa, 0xbc, 0x92, 0x7b, 0xeb, 0xef,
+                0x6a, 0x1c,
             ]
         );
         assert_eq!(
             response.session_base_key.as_ref(),
             &[
-                0x8d, 0xe4, 0x0c, 0xca, 0xdb, 0xc1, 0x4a, 0x82, 0xf1, 0x5c, 0xb0, 0xad, 0x0d,
-                0xe9, 0x5c, 0xa3,
+                0x8d, 0xe4, 0x0c, 0xca, 0xdb, 0xc1, 0x4a, 0x82, 0xf1, 0x5c, 0xb0, 0xad, 0x0d, 0xe9,
+                0x5c, 0xa3,
             ]
         );
         assert_eq!(response.lm_response, vec![0u8; 24]);

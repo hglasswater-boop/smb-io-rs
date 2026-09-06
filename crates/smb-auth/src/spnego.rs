@@ -125,7 +125,10 @@ fn encode_der_length(length: usize, out: &mut Vec<u8>) {
     }
 
     let bytes = length.to_be_bytes();
-    let first_non_zero = bytes.iter().position(|byte| *byte != 0).unwrap_or(bytes.len() - 1);
+    let first_non_zero = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len() - 1);
     let encoded = &bytes[first_non_zero..];
     out.push(0x80 | encoded.len() as u8);
     out.extend_from_slice(encoded);
