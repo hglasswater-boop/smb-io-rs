@@ -6,8 +6,11 @@
 //! mechanism-specific packet details into the SMB protocol state machine. Session keys and
 //! credential material remain secret types and never expose plaintext through `Debug`.
 
+mod ntlm;
 mod provider;
 mod secret;
+mod spnego;
 
+pub use ntlm::{NtlmCredentials, NtlmV2Provider, flags as ntlm_flags};
 pub use provider::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep};
 pub use secret::SecretBytes;
