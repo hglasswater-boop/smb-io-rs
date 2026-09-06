@@ -5,7 +5,7 @@ use getrandom::fill as random_fill;
 use hmac::{Hmac, Mac};
 use md4::{Digest as _, Md4};
 use md5::Md5;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::spnego::{encode_neg_token_init_ntlm, encode_neg_token_resp_ntlm, extract_ntlm_token};
 use crate::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, SecretBytes};
@@ -150,13 +150,6 @@ impl AuthProvider for NtlmV2Provider {
     }
 
     fn next_token(&mut self, server_token: &[u8]) -> Result<AuthStep, AuthError> {
-        if matches!(self.state, ProviderState::Complete) {
-            return Ok(AuthStep {
-                token: Vec::new(),
-                state: AuthState::Complete,
-            });
-        }
-
         let negotiate = match &self.state {
             ProviderState::NegotiateSent(message) => message.clone(),
             ProviderState::New => {
@@ -164,7 +157,12 @@ impl AuthProvider for NtlmV2Provider {
                     "NTLM CHALLENGE arrived before NEGOTIATE was sent",
                 ));
             }
-            ProviderState::Complete => unreachable!(),
+            ProviderState::Complete => {
+                return Ok(AuthStep {
+                    token: Vec::new(),
+                    state: AuthState::Complete,
+                });
+            }
         };
         let challenge_bytes = extract_ntlm_token(server_token)?.to_vec();
         let challenge = parse_challenge_message(&challenge_bytes)?;
@@ -281,7 +279,8 @@ fn build_authenticate_message(
     append_security_buffer(&mut message, 28, &domain)?;
     append_security_buffer(&mut message, 36, &username)?;
     append_security_buffer(&mut message, 44, &workstation)?;
-    set_security_buffer(&mut message, 52, 0, message.len())?;
+    let session_key_offset = message.len();
+    set_security_buffer(&mut message, 52, 0, session_key_offset)?;
 
     let mut session_key = [0u8; 16];
     session_key.copy_from_slice(computed.session_base_key.as_ref());
@@ -350,7 +349,6 @@ fn compute_ntlmv2_response(
     };
 
     let session_base_key = Zeroizing::new(hmac_md5(response_key.as_ref(), &nt_proof)?);
-    nt_hash.zeroize();
 
     Ok(ComputedResponse {
         lm_response,
