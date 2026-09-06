@@ -78,10 +78,10 @@ impl NegotiatedParameters {
 }
 
 pub struct Connection<T> {
-    transport: T,
-    message_ids: MessageIdAllocator,
-    negotiated: Option<NegotiatedParameters>,
-    preauth_hash: Option<PreauthIntegrityHash>,
+    pub(crate) transport: T,
+    pub(crate) message_ids: MessageIdAllocator,
+    pub(crate) negotiated: Option<NegotiatedParameters>,
+    pub(crate) preauth_hash: Option<PreauthIntegrityHash>,
 }
 
 impl<T> Connection<T>
