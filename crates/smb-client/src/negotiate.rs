@@ -3,9 +3,7 @@ use smb_io_wire::{
     capabilities, context_type, preauth_hash_algorithm, security_mode,
 };
 
-use crate::{
-    ClientError, MessageIdAllocator, PreauthIntegrityHash, SigningAlgorithm, Transport,
-};
+use crate::{ClientError, MessageIdAllocator, PreauthIntegrityHash, SigningAlgorithm, Transport};
 
 #[derive(Debug, Clone)]
 pub struct NegotiateConfig {
@@ -35,10 +33,7 @@ impl NegotiateConfig {
             capabilities: capabilities::LARGE_MTU,
             client_guid,
             preauth_salt,
-            signing_algorithms: vec![
-                SigningAlgorithm::AesCmac,
-                SigningAlgorithm::HmacSha256,
-            ],
+            signing_algorithms: vec![SigningAlgorithm::AesCmac, SigningAlgorithm::HmacSha256],
             credit_request: 64,
         }
     }
@@ -50,9 +45,7 @@ impl NegotiateConfig {
                     "SMB 3.1.1 negotiation requires a non-empty preauth salt",
                 ));
             }
-            let mut contexts = vec![NegotiateContext::preauth_sha512(
-                self.preauth_salt.clone(),
-            )?];
+            let mut contexts = vec![NegotiateContext::preauth_sha512(self.preauth_salt.clone())?];
             if !self.signing_algorithms.is_empty() {
                 contexts.push(signing_capabilities_context(&self.signing_algorithms)?);
             }
@@ -280,10 +273,8 @@ fn select_signing_algorithm(
             "SMB 3.1.1 server must select exactly one signing algorithm",
         ));
     }
-    let selected = SigningAlgorithm::try_from(u16::from_le_bytes([
-        context.data[2],
-        context.data[3],
-    ]))?;
+    let selected =
+        SigningAlgorithm::try_from(u16::from_le_bytes([context.data[2], context.data[3]]))?;
     if !offered.contains(&selected) {
         return Err(ClientError::Protocol(
             "server selected an SMB signing algorithm that was not offered",
@@ -351,10 +342,12 @@ mod tests {
         assert_eq!(config.dialects.last(), Some(&Dialect::Smb311));
         let request = config.request().unwrap();
         assert_eq!(request.contexts.len(), 2);
-        assert!(request
-            .contexts
-            .iter()
-            .any(|context| context.context_type == context_type::SIGNING_CAPABILITIES));
+        assert!(
+            request
+                .contexts
+                .iter()
+                .any(|context| context.context_type == context_type::SIGNING_CAPABILITIES)
+        );
     }
 
     #[test]

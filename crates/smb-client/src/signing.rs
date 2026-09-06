@@ -97,8 +97,7 @@ impl SigningState {
         set_signed_flag(message, true);
         message[SIGNATURE_OFFSET..SIGNATURE_OFFSET + SIGNATURE_SIZE].fill(0);
         let signature = self.compute_signature(message)?;
-        message[SIGNATURE_OFFSET..SIGNATURE_OFFSET + SIGNATURE_SIZE]
-            .copy_from_slice(&signature);
+        message[SIGNATURE_OFFSET..SIGNATURE_OFFSET + SIGNATURE_SIZE].copy_from_slice(&signature);
         Ok(())
     }
 
@@ -151,7 +150,9 @@ impl SigningState {
 
 fn ensure_smb2_message(message: &[u8]) -> Result<(), ClientError> {
     if message.len() < SMB2_HEADER_SIZE {
-        return Err(ClientError::Protocol("SMB message is shorter than its header"));
+        return Err(ClientError::Protocol(
+            "SMB message is shorter than its header",
+        ));
     }
     Smb2Header::decode(message)?;
     Ok(())
@@ -178,11 +179,7 @@ fn normalize_session_key(session_key: &SecretBytes) -> [u8; 16] {
 ///
 /// SMB passes null-terminated labels/contexts for 3.0/3.0.2. The KDF itself also inserts the
 /// required zero separator between Label and Context.
-fn sp800_108_kdf_128(
-    key: &[u8],
-    label: &[u8],
-    context: &[u8],
-) -> Result<[u8; 16], ClientError> {
+fn sp800_108_kdf_128(key: &[u8], label: &[u8], context: &[u8]) -> Result<[u8; 16], ClientError> {
     let mut input = Vec::with_capacity(4 + label.len() + 1 + context.len() + 4);
     input.extend_from_slice(&1u32.to_be_bytes());
     input.extend_from_slice(label);
@@ -208,8 +205,8 @@ mod tests {
     fn smb300_kdf_matches_microsoft_vector() {
         let session_key = SecretBytes::new(
             [
-                0x7c, 0xd4, 0x51, 0x82, 0x5d, 0x04, 0x50, 0xd2, 0x35, 0x42, 0x4e, 0x44, 0xba,
-                0x6e, 0x78, 0xcc,
+                0x7c, 0xd4, 0x51, 0x82, 0x5d, 0x04, 0x50, 0xd2, 0x35, 0x42, 0x4e, 0x44, 0xba, 0x6e,
+                0x78, 0xcc,
             ]
             .to_vec(),
         );
@@ -223,8 +220,8 @@ mod tests {
         assert_eq!(
             signing.key.expose(),
             &[
-                0x0b, 0x7e, 0x9c, 0x5c, 0xac, 0x36, 0xc0, 0xf6, 0xea, 0x9a, 0xb2, 0x75, 0x29,
-                0x8c, 0xed, 0xce,
+                0x0b, 0x7e, 0x9c, 0x5c, 0xac, 0x36, 0xc0, 0xf6, 0xea, 0x9a, 0xb2, 0x75, 0x29, 0x8c,
+                0xed, 0xce,
             ]
         );
     }
@@ -232,13 +229,9 @@ mod tests {
     #[test]
     fn hmac_sign_and_verify_roundtrip() {
         let key = SecretBytes::new(vec![0x11; 16]);
-        let signing = SigningState::derive(
-            Dialect::Smb210,
-            SigningAlgorithm::HmacSha256,
-            &key,
-            None,
-        )
-        .unwrap();
+        let signing =
+            SigningState::derive(Dialect::Smb210, SigningAlgorithm::HmacSha256, &key, None)
+                .unwrap();
         let mut message = Smb2Header::request(Command::Echo, 7, 0, 1)
             .encode()
             .to_vec();
@@ -253,13 +246,8 @@ mod tests {
     #[test]
     fn cmac_sign_and_verify_roundtrip() {
         let key = SecretBytes::new(vec![0x22; 16]);
-        let signing = SigningState::derive(
-            Dialect::Smb302,
-            SigningAlgorithm::AesCmac,
-            &key,
-            None,
-        )
-        .unwrap();
+        let signing =
+            SigningState::derive(Dialect::Smb302, SigningAlgorithm::AesCmac, &key, None).unwrap();
         let mut message = Smb2Header::request(Command::Echo, 8, 0, 1)
             .encode()
             .to_vec();
