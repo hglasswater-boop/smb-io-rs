@@ -10,11 +10,15 @@ mod error;
 mod message_id;
 mod negotiate;
 mod preauth;
+mod session;
 mod transport;
 
 pub use error::ClientError;
 pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
+pub use session::{
+    STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
+};
 pub use smb_io_wire::Dialect;
 pub use transport::{TcpTransport, TcpTransportConfig, Transport};
