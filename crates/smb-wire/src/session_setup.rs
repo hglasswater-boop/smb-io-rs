@@ -85,10 +85,7 @@ impl SessionSetupRequest {
 
     /// Decodes a complete client-to-server SESSION_SETUP request without the direct-TCP prefix.
     pub fn decode_message(message: &[u8]) -> Result<Self, WireError> {
-        require_len(
-            message,
-            SMB2_HEADER_SIZE + SESSION_SETUP_REQUEST_FIXED_SIZE,
-        )?;
+        require_len(message, SMB2_HEADER_SIZE + SESSION_SETUP_REQUEST_FIXED_SIZE)?;
         let header = Smb2Header::decode(message)?;
         if header.command != Command::SessionSetup {
             return Err(WireError::InvalidField("SESSION_SETUP request Command"));
@@ -230,7 +227,10 @@ mod tests {
             security_blob: vec![1, 2, 3, 4],
         };
         let message = request.encode_message(4, 42, 8).unwrap();
-        assert_eq!(SessionSetupRequest::decode_message(&message).unwrap(), request);
+        assert_eq!(
+            SessionSetupRequest::decode_message(&message).unwrap(),
+            request
+        );
     }
 
     #[test]
@@ -308,7 +308,8 @@ mod tests {
             security_blob: vec![1],
         };
         let mut message = request.encode_message(1, 0, 1).unwrap();
-        let flags = u32::from_le_bytes(message[16..20].try_into().unwrap()) | flags::SERVER_TO_REDIR;
+        let flags =
+            u32::from_le_bytes(message[16..20].try_into().unwrap()) | flags::SERVER_TO_REDIR;
         message[16..20].copy_from_slice(&flags.to_le_bytes());
         assert!(SessionSetupRequest::decode_message(&message).is_err());
     }

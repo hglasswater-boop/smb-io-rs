@@ -284,12 +284,7 @@ async fn real_ntlmv2_provider_emits_type1_then_type3_through_session_setup() {
 async fn server_cannot_change_session_id_mid_exchange() {
     let transport = ScriptedTransport::new([
         negotiate_311_response(),
-        session_response(
-            1,
-            0xAA,
-            STATUS_MORE_PROCESSING_REQUIRED,
-            b"challenge-token",
-        ),
+        session_response(1, 0xAA, STATUS_MORE_PROCESSING_REQUIRED, b"challenge-token"),
         session_response(2, 0xBB, STATUS_SUCCESS, &[]),
     ]);
 
