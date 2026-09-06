@@ -1,9 +1,13 @@
 use smb_io_auth::{AuthMechanism, AuthProvider, AuthState, SecretBytes};
 use smb_io_wire::{
-    Command, SessionSetupRequest, SessionSetupResponse, Smb2Header, StatusField, security_mode,
+    Command, SessionSetupRequest, SessionSetupResponse, Smb2Header, StatusField, flags,
+    security_mode, session_flags,
 };
 
-use crate::{ClientError, Connection, NegotiatedParameters, PreauthIntegrityHash, Transport};
+use crate::{
+    ClientError, Connection, NegotiatedParameters, PreauthIntegrityHash, SigningAlgorithm,
+    SigningState, Transport,
+};
 
 pub const STATUS_SUCCESS: u32 = 0x0000_0000;
 pub const STATUS_MORE_PROCESSING_REQUIRED: u32 = 0xC000_0016;
@@ -37,6 +41,8 @@ pub struct SessionConnection<T> {
     session_flags: u16,
     mechanism: AuthMechanism,
     session_key: Option<SecretBytes>,
+    signing: Option<SigningState>,
+    signing_required: bool,
 }
 
 impl<T> SessionConnection<T>
@@ -59,12 +65,38 @@ where
         self.session_key.is_some()
     }
 
+    pub fn signing_required(&self) -> bool {
+        self.signing_required
+    }
+
+    pub fn signing_algorithm(&self) -> Option<SigningAlgorithm> {
+        self.signing.as_ref().map(SigningState::algorithm)
+    }
+
     pub fn negotiated(&self) -> Option<&NegotiatedParameters> {
         self.connection.negotiated.as_ref()
     }
 
+    /// SMB 3.1.1 session preauthentication hash used for key derivation.
+    ///
+    /// It includes the final SESSION_SETUP request but intentionally excludes the final successful
+    /// SESSION_SETUP response, whose signature is verified with the key derived from this value.
     pub fn preauth_hash(&self) -> Option<&PreauthIntegrityHash> {
         self.connection.preauth_hash.as_ref()
+    }
+
+    pub fn sign_message(&self, message: &mut [u8]) -> Result<(), ClientError> {
+        let signing = self.signing.as_ref().ok_or(ClientError::Protocol(
+            "SMB session does not have signing state",
+        ))?;
+        signing.sign(message)
+    }
+
+    pub fn verify_message(&self, message: &mut [u8]) -> Result<(), ClientError> {
+        let signing = self.signing.as_ref().ok_or(ClientError::Protocol(
+            "SMB session does not have signing state",
+        ))?;
+        signing.verify(message)
     }
 
     pub fn into_connection(self) -> Connection<T> {
@@ -116,8 +148,7 @@ where
             update_preauth(&mut self.preauth_hash, &request_message);
 
             self.transport.send_message(&request_message).await?;
-            let response_message = self.transport.receive_message().await?;
-            update_preauth(&mut self.preauth_hash, &response_message);
+            let mut response_message = self.transport.receive_message().await?;
 
             let response_header = Smb2Header::decode(&response_message)?;
             if response_header.command != Command::SessionSetup {
@@ -151,6 +182,8 @@ where
             }
 
             if status == STATUS_MORE_PROCESSING_REQUIRED {
+                // Every non-final response participates in the SMB 3.1.1 preauth transcript.
+                update_preauth(&mut self.preauth_hash, &response_message);
                 if session_id == 0 {
                     return Err(ClientError::Protocol(
                         "server did not assign a SessionId during authentication",
@@ -190,12 +223,44 @@ where
                 ));
             }
 
+            let negotiated = self.negotiated.as_ref().ok_or(ClientError::Protocol(
+                "negotiated parameters disappeared during SESSION_SETUP",
+            ))?;
+            let is_guest_or_null = response.session_flags
+                & (session_flags::IS_GUEST | session_flags::IS_NULL)
+                != 0;
+            let signing_required = negotiated.require_signing && !is_guest_or_null;
+            let signing = match session_key.as_ref() {
+                Some(key) if mechanism != AuthMechanism::Anonymous && !is_guest_or_null => {
+                    Some(SigningState::derive(
+                        negotiated.dialect,
+                        negotiated.signing_algorithm,
+                        key,
+                        self.preauth_hash.as_ref(),
+                    )?)
+                }
+                _ => None,
+            };
+
+            if response_header.flags & flags::SIGNED != 0 {
+                let signing = signing.as_ref().ok_or(ClientError::Protocol(
+                    "server signed SESSION_SETUP without an available signing key",
+                ))?;
+                signing.verify(&mut response_message)?;
+            } else if signing_required {
+                return Err(ClientError::Protocol(
+                    "server omitted a required SESSION_SETUP signature",
+                ));
+            }
+
             return Ok(SessionConnection {
                 connection: self,
                 session_id,
                 session_flags: response.session_flags,
                 mechanism,
                 session_key,
+                signing,
+                signing_required,
             });
         }
 
