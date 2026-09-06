@@ -6,6 +6,8 @@ members = [
     "crates/smb-client",
     "crates/smb-fs",
     "crates/smb-stream",
+    "crates/smb-android",
+    "crates/smb-testkit",
 ]
 
 [workspace.package]
