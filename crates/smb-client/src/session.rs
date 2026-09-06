@@ -59,23 +59,12 @@ where
         self.session_key.is_some()
     }
 
-    pub fn negotiated(&self) -> &NegotiatedParameters {
-        self.connection
-            .negotiated
-            .as_ref()
-            .expect("SessionConnection can only be constructed after negotiation")
+    pub fn negotiated(&self) -> Option<&NegotiatedParameters> {
+        self.connection.negotiated.as_ref()
     }
 
     pub fn preauth_hash(&self) -> Option<&PreauthIntegrityHash> {
         self.connection.preauth_hash.as_ref()
-    }
-
-    pub(crate) fn session_key(&self) -> Option<&SecretBytes> {
-        self.session_key.as_ref()
-    }
-
-    pub(crate) fn connection_mut(&mut self) -> &mut Connection<T> {
-        &mut self.connection
     }
 
     pub fn into_connection(self) -> Connection<T> {
