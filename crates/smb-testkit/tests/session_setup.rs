@@ -1,12 +1,15 @@
-use smb_io_auth::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, SecretBytes};
+use smb_io_auth::{
+    AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, NtlmCredentials, NtlmV2Provider,
+    SecretBytes, ntlm_flags,
+};
 use smb_io_client::{
     Connection, Dialect, NegotiateConfig, STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS,
     SessionSetupConfig,
 };
 use smb_io_testkit::ScriptedTransport;
 use smb_io_wire::{
-    Command, SMB2_PROTOCOL_ID, Smb2Header, StatusField, capabilities, context_type, flags,
-    preauth_hash_algorithm, security_mode,
+    Command, SMB2_PROTOCOL_ID, SessionSetupRequest, Smb2Header, StatusField, capabilities,
+    context_type, flags, preauth_hash_algorithm, security_mode,
 };
 
 struct FakeNtlm {
@@ -115,6 +118,76 @@ fn session_response(
     message
 }
 
+fn ntlm_type2_challenge() -> Vec<u8> {
+    let mut target_info = Vec::new();
+    // MsvAvNbDomainName = "Domain"
+    target_info.extend_from_slice(&2u16.to_le_bytes());
+    target_info.extend_from_slice(&12u16.to_le_bytes());
+    for unit in "Domain".encode_utf16() {
+        target_info.extend_from_slice(&unit.to_le_bytes());
+    }
+    // MsvAvNbComputerName = "Server"
+    target_info.extend_from_slice(&1u16.to_le_bytes());
+    target_info.extend_from_slice(&12u16.to_le_bytes());
+    for unit in "Server".encode_utf16() {
+        target_info.extend_from_slice(&unit.to_le_bytes());
+    }
+    // Fixed MsvAvTimestamp keeps this integration test deterministic except for ClientChallenge.
+    target_info.extend_from_slice(&7u16.to_le_bytes());
+    target_info.extend_from_slice(&8u16.to_le_bytes());
+    target_info.extend_from_slice(&0x01c3_34b7_36d3_9000u64.to_le_bytes());
+    // MsvAvEOL
+    target_info.extend_from_slice(&0u16.to_le_bytes());
+    target_info.extend_from_slice(&0u16.to_le_bytes());
+
+    let mut message = vec![0u8; 48];
+    message[0..8].copy_from_slice(b"NTLMSSP\0");
+    put_u32(&mut message, 8, 2);
+    let challenge_flags = ntlm_flags::NEGOTIATE_UNICODE
+        | ntlm_flags::NEGOTIATE_NTLM
+        | ntlm_flags::NEGOTIATE_ALWAYS_SIGN
+        | ntlm_flags::NEGOTIATE_EXTENDED_SESSIONSECURITY
+        | ntlm_flags::NEGOTIATE_TARGET_INFO
+        | ntlm_flags::NEGOTIATE_128
+        | ntlm_flags::NEGOTIATE_56;
+    put_u32(&mut message, 20, challenge_flags);
+    message[24..32].copy_from_slice(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+    put_u16(&mut message, 40, target_info.len() as u16);
+    put_u16(&mut message, 42, target_info.len() as u16);
+    put_u32(&mut message, 44, 48);
+    message.extend_from_slice(&target_info);
+    message
+}
+
+fn find_ntlm_message(blob: &[u8]) -> &[u8] {
+    let start = blob
+        .windows(8)
+        .position(|window| window == b"NTLMSSP\0")
+        .expect("SPNEGO token should contain NTLMSSP");
+    &blob[start..]
+}
+
+fn read_ntlm_security_buffer<'a>(message: &'a [u8], field_offset: usize) -> &'a [u8] {
+    let length = usize::from(u16::from_le_bytes([
+        message[field_offset],
+        message[field_offset + 1],
+    ]));
+    let offset = u32::from_le_bytes([
+        message[field_offset + 4],
+        message[field_offset + 5],
+        message[field_offset + 6],
+        message[field_offset + 7],
+    ]) as usize;
+    &message[offset..offset + length]
+}
+
+fn utf16le(value: &str) -> Vec<u8> {
+    value
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>()
+}
+
 #[tokio::test]
 async fn multi_round_session_setup_reuses_server_session_id_and_extends_preauth_hash() {
     let session_id = 0x1122_3344_5566_7788;
@@ -159,10 +232,64 @@ async fn multi_round_session_setup_reuses_server_session_id_and_extends_preauth_
 }
 
 #[tokio::test]
+async fn real_ntlmv2_provider_emits_type1_then_type3_through_session_setup() {
+    let session_id = 0x0102_0304_0506_0708;
+    let transport = ScriptedTransport::new([
+        negotiate_311_response(),
+        session_response(
+            1,
+            session_id,
+            STATUS_MORE_PROCESSING_REQUIRED,
+            &ntlm_type2_challenge(),
+        ),
+        session_response(2, session_id, STATUS_SUCCESS, &[]),
+    ]);
+
+    let mut connection = Connection::new(transport);
+    connection
+        .negotiate(&NegotiateConfig::modern([0x55; 16], vec![0x66; 32]))
+        .await
+        .unwrap();
+
+    let credentials = NtlmCredentials::new("User", "Password")
+        .with_domain("Domain")
+        .with_workstation("COMPUTER");
+    let mut auth = NtlmV2Provider::new(credentials);
+    let session = connection
+        .session_setup(&mut auth, SessionSetupConfig::default())
+        .await
+        .unwrap();
+
+    assert_eq!(session.session_id(), session_id);
+    assert_eq!(session.mechanism(), AuthMechanism::NtlmV2);
+    assert!(session.has_session_key());
+
+    let transport = session.into_connection().into_transport();
+    let first = SessionSetupRequest::decode_message(&transport.sent_messages()[1]).unwrap();
+    let second = SessionSetupRequest::decode_message(&transport.sent_messages()[2]).unwrap();
+
+    let type1 = find_ntlm_message(&first.security_blob);
+    assert_eq!(u32::from_le_bytes(type1[8..12].try_into().unwrap()), 1);
+
+    let type3 = find_ntlm_message(&second.security_blob);
+    assert_eq!(u32::from_le_bytes(type3[8..12].try_into().unwrap()), 3);
+    assert_eq!(read_ntlm_security_buffer(type3, 28), utf16le("Domain"));
+    assert_eq!(read_ntlm_security_buffer(type3, 36), utf16le("User"));
+    assert_eq!(read_ntlm_security_buffer(type3, 44), utf16le("COMPUTER"));
+    assert_eq!(read_ntlm_security_buffer(type3, 12), vec![0u8; 24]);
+    assert!(!read_ntlm_security_buffer(type3, 20).is_empty());
+}
+
+#[tokio::test]
 async fn server_cannot_change_session_id_mid_exchange() {
     let transport = ScriptedTransport::new([
         negotiate_311_response(),
-        session_response(1, 0xAA, STATUS_MORE_PROCESSING_REQUIRED, b"challenge-token"),
+        session_response(
+            1,
+            0xAA,
+            STATUS_MORE_PROCESSING_REQUIRED,
+            b"challenge-token",
+        ),
         session_response(2, 0xBB, STATUS_SUCCESS, &[]),
     ]);
 
