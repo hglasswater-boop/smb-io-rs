@@ -1,0 +1,15 @@
+[package]
+name = "smb-io-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+smb-io-client = { path = "../smb-client" }
+smb-io-fs = { path = "../smb-fs" }
+smb-io-stream = { path = "../smb-stream" }
+
+[lints.clippy]
+all = "warn"
