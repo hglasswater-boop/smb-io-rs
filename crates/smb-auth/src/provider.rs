@@ -45,7 +45,7 @@ impl std::error::Error for AuthError {}
 /// Authentication mechanism plugged into the SMB SESSION_SETUP exchange.
 ///
 /// Implementations own SPNEGO/NTLM/Kerberos token semantics. The SMB client only transports the
-/// returned opaque tokens and consumes the final session key after authentication completes.
+/// returned opaque tokens and takes ownership of the final session key after authentication.
 pub trait AuthProvider {
     fn mechanism(&self) -> AuthMechanism;
 
@@ -55,6 +55,9 @@ pub trait AuthProvider {
     /// Process one server security blob and optionally produce the next client token.
     fn next_token(&mut self, server_token: &[u8]) -> Result<AuthStep, AuthError>;
 
-    /// Returns the session key only after the mechanism has completed successfully.
-    fn session_key(&self) -> Option<&SecretBytes>;
+    /// Transfers the completed mechanism's session key into the SMB session.
+    ///
+    /// Anonymous mechanisms may return `None`. Authenticated mechanisms are expected to return a
+    /// key after reaching `AuthState::Complete`.
+    fn take_session_key(&mut self) -> Option<SecretBytes>;
 }
