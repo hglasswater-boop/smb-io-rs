@@ -1,0 +1,14 @@
+[package]
+name = "smb-io-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+smb-io-wire = { path = "../smb-wire" }
+smb-io-auth = { path = "../smb-auth" }
+
+[lints]
+workspace = true
