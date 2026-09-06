@@ -1,6 +1,7 @@
 use crate::error::{WireError, checked_range, require_len};
 use crate::header::{
-    Command, SMB2_HEADER_SIZE, Smb2Header, flags, get_u16, put_u16, put_u32, put_u64,
+    Command, SMB2_HEADER_SIZE, Smb2Header, flags, get_u16, get_u32, get_u64, put_u16, put_u32,
+    put_u64,
 };
 
 pub const SESSION_SETUP_REQUEST_STRUCTURE_SIZE: u16 = 25;
@@ -80,6 +81,60 @@ impl SessionSetupRequest {
         message.extend_from_slice(&header);
         message.extend_from_slice(&body);
         Ok(message)
+    }
+
+    /// Decodes a complete client-to-server SESSION_SETUP request without the direct-TCP prefix.
+    pub fn decode_message(message: &[u8]) -> Result<Self, WireError> {
+        require_len(
+            message,
+            SMB2_HEADER_SIZE + SESSION_SETUP_REQUEST_FIXED_SIZE,
+        )?;
+        let header = Smb2Header::decode(message)?;
+        if header.command != Command::SessionSetup {
+            return Err(WireError::InvalidField("SESSION_SETUP request Command"));
+        }
+        if header.flags & flags::SERVER_TO_REDIR != 0 {
+            return Err(WireError::InvalidField("SESSION_SETUP request direction"));
+        }
+
+        let body = &message[SMB2_HEADER_SIZE..];
+        let structure_size = get_u16(body, 0);
+        if structure_size != SESSION_SETUP_REQUEST_STRUCTURE_SIZE {
+            return Err(WireError::InvalidStructureSize {
+                expected: SESSION_SETUP_REQUEST_STRUCTURE_SIZE,
+                actual: structure_size,
+            });
+        }
+        if get_u32(body, 8) != 0 {
+            return Err(WireError::InvalidField("SESSION_SETUP reserved Channel"));
+        }
+
+        let security_offset = get_u16(body, 12) as usize;
+        let security_len = get_u16(body, 14) as usize;
+        let security_blob = if security_len == 0 {
+            Vec::new()
+        } else {
+            if security_offset < SMB2_HEADER_SIZE + SESSION_SETUP_REQUEST_FIXED_SIZE {
+                return Err(WireError::InvalidField(
+                    "SESSION_SETUP SecurityBufferOffset before request buffer",
+                ));
+            }
+            let range = checked_range(
+                message.len(),
+                "SESSION_SETUP SecurityBuffer",
+                security_offset,
+                security_len,
+            )?;
+            message[range].to_vec()
+        };
+
+        Ok(Self {
+            flags: body[2],
+            security_mode: body[3],
+            capabilities: get_u32(body, 4),
+            previous_session_id: get_u64(body, 16),
+            security_blob,
+        })
     }
 }
 
@@ -166,6 +221,19 @@ mod tests {
     }
 
     #[test]
+    fn request_message_roundtrips() {
+        let request = SessionSetupRequest {
+            flags: request_flags::BINDING,
+            security_mode: 1,
+            capabilities: 1,
+            previous_session_id: 123,
+            security_blob: vec![1, 2, 3, 4],
+        };
+        let message = request.encode_message(4, 42, 8).unwrap();
+        assert_eq!(SessionSetupRequest::decode_message(&message).unwrap(), request);
+    }
+
+    #[test]
     fn continuation_request_carries_session_id_in_header() {
         let request = SessionSetupRequest {
             flags: 0,
@@ -228,6 +296,21 @@ mod tests {
         put_u16(&mut body, 0, SESSION_SETUP_RESPONSE_STRUCTURE_SIZE);
         message.extend_from_slice(&body);
         assert!(SessionSetupResponse::decode_message(&message).is_err());
+    }
+
+    #[test]
+    fn request_must_be_client_to_server() {
+        let request = SessionSetupRequest {
+            flags: 0,
+            security_mode: 1,
+            capabilities: 0,
+            previous_session_id: 0,
+            security_blob: vec![1],
+        };
+        let mut message = request.encode_message(1, 0, 1).unwrap();
+        let flags = u32::from_le_bytes(message[16..20].try_into().unwrap()) | flags::SERVER_TO_REDIR;
+        message[16..20].copy_from_slice(&flags.to_le_bytes());
+        assert!(SessionSetupRequest::decode_message(&message).is_err());
     }
 
     #[test]
