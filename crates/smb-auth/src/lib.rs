@@ -2,13 +2,12 @@
 
 //! Authentication provider boundary for SMB sessions.
 //!
-//! Initial implementations will cover SPNEGO + NTLMv2. Session keys and
-//! credential material must remain secret types and must never leak through
-//! logs or Debug output.
+//! Implementations cover SPNEGO + NTLMv2 first and can later add Kerberos without leaking
+//! mechanism-specific packet details into the SMB protocol state machine. Session keys and
+//! credential material remain secret types and never expose plaintext through `Debug`.
 
-/// Authentication mechanism selected for a session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AuthMechanism {
-    Anonymous,
-    NtlmV2,
-}
+mod provider;
+mod secret;
+
+pub use provider::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep};
+pub use secret::SecretBytes;
