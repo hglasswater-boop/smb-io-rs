@@ -10,5 +10,8 @@ repository.workspace = true
 smb-io-wire = { path = "../smb-wire" }
 smb-io-client = { path = "../smb-client" }
 
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt"] }
+
 [lints]
 workspace = true
