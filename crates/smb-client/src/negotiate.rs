@@ -114,7 +114,9 @@ where
         config: &NegotiateConfig,
     ) -> Result<&NegotiatedParameters, ClientError> {
         if self.negotiated.is_some() {
-            return Err(ClientError::Protocol("SMB connection is already negotiated"));
+            return Err(ClientError::Protocol(
+                "SMB connection is already negotiated",
+            ));
         }
 
         let request = config.request()?;
@@ -140,7 +142,9 @@ where
             StatusField::Status(0) => {}
             StatusField::Status(status) => return Err(ClientError::ServerStatus(status)),
             StatusField::ChannelSequence { .. } => {
-                return Err(ClientError::Protocol("NEGOTIATE response used request header form"));
+                return Err(ClientError::Protocol(
+                    "NEGOTIATE response used request header form",
+                ));
             }
         }
 
@@ -183,7 +187,9 @@ where
 
         self.preauth_hash = preauth_hash;
         self.negotiated = Some(parameters);
-        Ok(self.negotiated.as_ref().expect("negotiated parameters just set"))
+        self.negotiated
+            .as_ref()
+            .ok_or(ClientError::Protocol("failed to store negotiated parameters"))
     }
 }
 
