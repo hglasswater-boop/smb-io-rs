@@ -167,7 +167,7 @@ fn find_ntlm_message(blob: &[u8]) -> &[u8] {
     &blob[start..]
 }
 
-fn read_ntlm_security_buffer<'a>(message: &'a [u8], field_offset: usize) -> &'a [u8] {
+fn read_ntlm_security_buffer(message: &[u8], field_offset: usize) -> &[u8] {
     let length = usize::from(u16::from_le_bytes([
         message[field_offset],
         message[field_offset + 1],
