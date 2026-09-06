@@ -1,0 +1,48 @@
+name: NTLM Fix Once
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply focused fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/smb-auth/src/ntlm.rs')
+          text = path.read_text()
+          text = text.replace('use zeroize::{Zeroize, Zeroizing};', 'use zeroize::Zeroizing;')
+          text = text.replace(
+              '''        if matches!(self.state, ProviderState::Complete) {\n            return Ok(AuthStep {\n                token: Vec::new(),\n                state: AuthState::Complete,\n            });\n        }\n\n        let negotiate = match &self.state {\n            ProviderState::NegotiateSent(message) => message.clone(),\n            ProviderState::New => {\n                return Err(AuthError::InvalidState(\n                    "NTLM CHALLENGE arrived before NEGOTIATE was sent",\n                ));\n            }\n            ProviderState::Complete => unreachable!(),\n        };''',
+              '''        let negotiate = match &self.state {\n            ProviderState::NegotiateSent(message) => message.clone(),\n            ProviderState::New => {\n                return Err(AuthError::InvalidState(\n                    "NTLM CHALLENGE arrived before NEGOTIATE was sent",\n                ));\n            }\n            ProviderState::Complete => {\n                return Ok(AuthStep {\n                    token: Vec::new(),\n                    state: AuthState::Complete,\n                });\n            }\n        };'''
+          )
+          text = text.replace(
+              '    set_security_buffer(&mut message, 52, 0, message.len())?;',
+              '    let session_key_offset = message.len();\n    set_security_buffer(&mut message, 52, 0, session_key_offset)?;'
+          )
+          text = text.replace(
+              '    let session_base_key = Zeroizing::new(hmac_md5(response_key.as_ref(), &nt_proof)?);\n    nt_hash.zeroize();',
+              '    let session_base_key = Zeroizing::new(hmac_md5(response_key.as_ref(), &nt_proof)?);'
+          )
+          path.write_text(text)
+          PY
+          cargo fmt --all
+      - name: Commit fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/smb-auth/src/ntlm.rs
+          git diff --cached --quiet || git commit -m "fix(auth): resolve NTLM borrow and remove panic path"
+          git push
