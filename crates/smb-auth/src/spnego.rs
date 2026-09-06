@@ -114,7 +114,7 @@ fn der_length_size(length: usize) -> usize {
     if length < 128 {
         1
     } else {
-        1 + ((usize::BITS - length.leading_zeros() + 7) / 8) as usize
+        1 + (usize::BITS - length.leading_zeros()).div_ceil(8) as usize
     }
 }
 
