@@ -9,7 +9,11 @@ repository.workspace = true
 [dependencies]
 smb-io-wire = { path = "../smb-wire" }
 smb-io-auth = { path = "../smb-auth" }
+aes = "0.8"
+cmac = "0.7"
+hmac = "0.12"
 sha2 = "0.10"
+subtle = "2.6"
 tokio = { version = "1.40", features = ["io-util", "net", "time"] }
 
 [lints]
