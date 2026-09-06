@@ -1,7 +1,6 @@
 use crate::error::{WireError, checked_range, require_len};
 use crate::header::{
-    Command, SMB2_HEADER_SIZE, Smb2Header, flags, get_u16, get_u32, get_u64, put_u16,
-    put_u32,
+    Command, SMB2_HEADER_SIZE, Smb2Header, flags, get_u16, get_u32, get_u64, put_u16, put_u32,
 };
 
 pub const NEGOTIATE_REQUEST_STRUCTURE_SIZE: u16 = 36;
@@ -176,8 +175,13 @@ impl NegotiateRequest {
     }
 
     /// Encodes a complete SMB2 NEGOTIATE message, without the 4-byte direct-TCP prefix.
-    pub fn encode_message(&self, message_id: u64, credit_request: u16) -> Result<Vec<u8>, WireError> {
-        let header = Smb2Header::request(Command::Negotiate, message_id, 0, credit_request).encode();
+    pub fn encode_message(
+        &self,
+        message_id: u64,
+        credit_request: u16,
+    ) -> Result<Vec<u8>, WireError> {
+        let header =
+            Smb2Header::request(Command::Negotiate, message_id, 0, credit_request).encode();
         let body = self.encode_body()?;
         let mut message = Vec::with_capacity(header.len() + body.len());
         message.extend_from_slice(&header);
@@ -286,12 +290,8 @@ fn decode_contexts(
         let context_type = get_u16(header, 0);
         let data_len = get_u16(header, 2) as usize;
         let data_start = cursor + 8;
-        let data_range = checked_range(
-            message.len(),
-            "NegotiateContext.Data",
-            data_start,
-            data_len,
-        )?;
+        let data_range =
+            checked_range(message.len(), "NegotiateContext.Data", data_start, data_len)?;
         contexts.push(NegotiateContext {
             context_type,
             data: message[data_range.clone()].to_vec(),
@@ -316,8 +316,8 @@ mod tests {
 
     fn guid() -> [u8; 16] {
         [
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
-            0xDD, 0xEE, 0xFF,
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF,
         ]
     }
 
@@ -369,7 +369,10 @@ mod tests {
         assert_eq!(offset % 8, 0);
         assert_eq!(get_u16(&body, 32), 1);
         let local = offset - SMB2_HEADER_SIZE;
-        assert_eq!(get_u16(&body, local), context_type::PREAUTH_INTEGRITY_CAPABILITIES);
+        assert_eq!(
+            get_u16(&body, local),
+            context_type::PREAUTH_INTEGRITY_CAPABILITIES
+        );
         assert_eq!(get_u16(&body, local + 8), 1);
         assert_eq!(get_u16(&body, local + 10), 32);
         assert_eq!(get_u16(&body, local + 12), preauth_hash_algorithm::SHA_512);
@@ -393,7 +396,11 @@ mod tests {
         put_u32(&mut body, 36, 4 * 1024 * 1024);
         put_u64(&mut body, 40, 1234);
         put_u64(&mut body, 48, 5678);
-        put_u16(&mut body, 56, (SMB2_HEADER_SIZE + NEGOTIATE_RESPONSE_FIXED_SIZE) as u16);
+        put_u16(
+            &mut body,
+            56,
+            (SMB2_HEADER_SIZE + NEGOTIATE_RESPONSE_FIXED_SIZE) as u16,
+        );
         put_u16(&mut body, 58, 3);
 
         let mut message = Vec::new();

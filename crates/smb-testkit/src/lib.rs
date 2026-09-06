@@ -45,8 +45,8 @@ impl Transport for ScriptedTransport {
     }
 
     async fn receive_message(&mut self) -> Result<Vec<u8>, ClientError> {
-        self.incoming
-            .pop_front()
-            .ok_or(ClientError::Protocol("scripted transport has no queued response"))
+        self.incoming.pop_front().ok_or(ClientError::Protocol(
+            "scripted transport has no queued response",
+        ))
     }
 }

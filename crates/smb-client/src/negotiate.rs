@@ -187,9 +187,9 @@ where
 
         self.preauth_hash = preauth_hash;
         self.negotiated = Some(parameters);
-        self.negotiated
-            .as_ref()
-            .ok_or(ClientError::Protocol("failed to store negotiated parameters"))
+        self.negotiated.as_ref().ok_or(ClientError::Protocol(
+            "failed to store negotiated parameters",
+        ))
     }
 }
 

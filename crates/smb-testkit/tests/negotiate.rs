@@ -1,6 +1,8 @@
 use smb_io_client::{Connection, Dialect, NegotiateConfig};
 use smb_io_testkit::ScriptedTransport;
-use smb_io_wire::{SMB2_PROTOCOL_ID, capabilities, context_type, preauth_hash_algorithm, security_mode};
+use smb_io_wire::{
+    SMB2_PROTOCOL_ID, capabilities, context_type, preauth_hash_algorithm, security_mode,
+};
 
 fn put_u16(out: &mut [u8], offset: usize, value: u16) {
     out[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
