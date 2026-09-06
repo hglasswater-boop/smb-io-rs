@@ -30,7 +30,9 @@ pub struct SessionSetupRequest {
 impl SessionSetupRequest {
     pub fn validate(&self) -> Result<(), WireError> {
         if self.security_blob.len() > u16::MAX as usize {
-            return Err(WireError::InvalidField("SESSION_SETUP SecurityBufferLength"));
+            return Err(WireError::InvalidField(
+                "SESSION_SETUP SecurityBufferLength",
+            ));
         }
         Ok(())
     }
@@ -48,7 +50,9 @@ impl SessionSetupRequest {
             let offset = SMB2_HEADER_SIZE
                 .checked_add(SESSION_SETUP_REQUEST_FIXED_SIZE)
                 .and_then(|value| u16::try_from(value).ok())
-                .ok_or(WireError::InvalidField("SESSION_SETUP SecurityBufferOffset"))?;
+                .ok_or(WireError::InvalidField(
+                    "SESSION_SETUP SecurityBufferOffset",
+                ))?;
             put_u16(&mut body, 12, offset);
             put_u16(&mut body, 14, self.security_blob.len() as u16);
         }

@@ -34,7 +34,9 @@ impl fmt::Display for AuthError {
         match self {
             Self::InvalidToken(message) => write!(f, "invalid authentication token: {message}"),
             Self::InvalidState(message) => write!(f, "invalid authentication state: {message}"),
-            Self::Unsupported(message) => write!(f, "unsupported authentication feature: {message}"),
+            Self::Unsupported(message) => {
+                write!(f, "unsupported authentication feature: {message}")
+            }
             Self::Failed(message) => write!(f, "authentication failed: {message}"),
         }
     }
