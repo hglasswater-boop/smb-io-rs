@@ -13,7 +13,8 @@ const SIGNATURE_SIZE: usize = 16;
 const KDF_OUTPUT_BITS: u32 = 128;
 
 /// SMB signing algorithms as assigned by SMB2_SIGNING_CAPABILITIES.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]\#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
 pub enum SigningAlgorithm {
     HmacSha256 = 0x0000,
     AesCmac = 0x0001,
@@ -67,32 +68,17 @@ impl SigningState {
                 "AES-GMAC signing is not implemented yet",
             ));
         }
-        if dialect != Dialect::Smb311 && algorithm != SigningAlgorithm::HmacSha256
-            && !matches!(dialect, Dialect::Smb300 | Dialect::Smb302)
-        {
-            return Err(ClientError::Protocol(
-                "invalid SMB signing algorithm for negotiated dialect",
-            ));
-        }
 
         let key = match dialect {
             Dialect::Smb202 | Dialect::Smb210 => normalized.to_vec(),
-            Dialect::Smb300 | Dialect::Smb302 => sp800_108_kdf_128(
-                &normalized,
-                b"SMB2AESCMAC\0",
-                b"SmbSign\0",
-            )?
-            .to_vec(),
+            Dialect::Smb300 | Dialect::Smb302 => {
+                sp800_108_kdf_128(&normalized, b"SMB2AESCMAC\0", b"SmbSign\0")?.to_vec()
+            }
             Dialect::Smb311 => {
                 let preauth = preauth_hash.ok_or(ClientError::Protocol(
                     "SMB 3.1.1 signing requires a preauthentication hash",
                 ))?;
-                sp800_108_kdf_128(
-                    &normalized,
-                    b"SMBSigningKey\0",
-                    preauth.current(),
-                )?
-                .to_vec()
+                sp800_108_kdf_128(&normalized, b"SMBSigningKey\0", preauth.current())?.to_vec()
             }
         };
 
@@ -172,7 +158,7 @@ fn ensure_smb2_message(message: &[u8]) -> Result<(), ClientError> {
 }
 
 fn set_signed_flag(message: &mut [u8], signed: bool) {
-    let mut value = u32::from_le_bytes(message[16..20].try_into().unwrap_or([0; 4]));
+    let mut value = u32::from_le_bytes([message[16], message[17], message[18], message[19]]);
     if signed {
         value |= flags::SIGNED;
     } else {
