@@ -180,7 +180,9 @@ pub fn decode_create_contexts(input: &[u8]) -> Result<Vec<CreateContext>, WireEr
             return Err(WireError::InvalidField("CREATE context Name"));
         }
         if name_offset % CREATE_CONTEXT_ALIGNMENT != 0 {
-            return Err(WireError::InvalidField("CREATE context NameOffset alignment"));
+            return Err(WireError::InvalidField(
+                "CREATE context NameOffset alignment",
+            ));
         }
         let name_range = checked_range(extent, "CREATE context Name", name_offset, name_length)?;
 
