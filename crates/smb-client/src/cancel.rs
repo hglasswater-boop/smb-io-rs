@@ -1,8 +1,6 @@
-use smb_io_wire::{
-    CancelRequest, Command, HeaderId, ReadRequest, ReadResponse, Smb2Header, StatusField, flags,
-    session_flags,
-};
+use smb_io_wire::{CancelRequest, ReadRequest, ReadResponse, Smb2Header, StatusField, flags, session_flags};
 
+use crate::read_async::{AsyncReadState, ReadResponsePhase};
 use crate::{
     ClientError, FileHandle, PipelinedReadOptions, ReadCancellationToken, SessionConnection,
     Transport,
@@ -15,6 +13,8 @@ const CREDIT_UNIT_BYTES: usize = 65_536;
 struct PendingRead {
     message_id: u64,
     chunk_len: usize,
+    async_state: AsyncReadState,
+    async_cancel_sent: bool,
 }
 
 impl<T> SessionConnection<T>
@@ -24,7 +24,8 @@ where
     /// Pipelined positional READ that can be invalidated by a seek generation change.
     ///
     /// When `cancellation` advances away from `generation`, SMB2 CANCEL is sent for every
-    /// outstanding READ. The method then drains the target READ responses before returning
+    /// outstanding READ. If a request has transitioned through STATUS_PENDING, its AsyncId is used
+    /// in the CANCEL header. The method drains every final READ response before returning
     /// `ClientError::Cancelled`, preserving transport framing for the next request.
     pub async fn read_at_pipelined_cancelable_with_options(
         &mut self,
@@ -114,6 +115,8 @@ where
                 pending.push(PendingRead {
                     message_id,
                     chunk_len,
+                    async_state: AsyncReadState::default(),
+                    async_cancel_sent: false,
                 });
                 scheduled += chunk_len;
             }
@@ -133,14 +136,14 @@ where
             let mut cancelled = !cancellation.is_current(generation);
 
             if cancelled {
-                send_cancel_requests(self, &pending, &completed).await?;
+                send_cancel_requests(self, &mut pending, &completed).await?;
             }
 
             let mut received = 0usize;
             while received < pending.len() {
                 if !cancelled && !cancellation.is_current(generation) {
                     cancelled = true;
-                    send_cancel_requests(self, &pending, &completed).await?;
+                    send_cancel_requests(self, &mut pending, &completed).await?;
                 }
 
                 let response_result = if cancelled {
@@ -150,7 +153,7 @@ where
                         changed = cancellation.wait_for_change(generation) => {
                             let _ = changed;
                             cancelled = true;
-                            send_cancel_requests(self, &pending, &completed).await?;
+                            send_cancel_requests(self, &mut pending, &completed).await?;
                             continue;
                         }
                         response = self.connection.transport.receive_message() => response,
@@ -167,13 +170,36 @@ where
                     ))?;
                 if completed[position].is_some() {
                     return Err(ClientError::Protocol(
-                        "pipelined READ received a duplicate response",
+                        "pipelined READ received a duplicate final response",
                     ));
                 }
 
-                validate_read_header(self, file, &header, pending[position].message_id)?;
+                let phase = pending[position].async_state.validate(
+                    file.tree_id(),
+                    self.session_id,
+                    pending[position].message_id,
+                    &header,
+                )?;
                 self.connection.grant_credits(header.credits)?;
                 verify_response(self, &mut response_message, &header)?;
+
+                if phase == ReadResponsePhase::InterimPending {
+                    if cancelled && !pending[position].async_cancel_sent {
+                        let async_id = pending[position]
+                            .async_state
+                            .async_id()
+                            .ok_or(ClientError::Protocol(
+                                "STATUS_PENDING READ did not record an AsyncId",
+                            ))?;
+                        self.send_cancel_for_message_id(
+                            pending[position].message_id,
+                            Some(async_id),
+                        )
+                        .await?;
+                        pending[position].async_cancel_sent = true;
+                    }
+                    continue;
+                }
 
                 match header.status {
                     StatusField::Status(0) => {
@@ -234,8 +260,17 @@ where
         Ok(out)
     }
 
-    async fn send_cancel_for_message_id(&mut self, message_id: u64) -> Result<(), ClientError> {
-        let mut message = CancelRequest.encode_sync_message(message_id, self.session_id);
+    async fn send_cancel_for_message_id(
+        &mut self,
+        message_id: u64,
+        async_id: Option<u64>,
+    ) -> Result<(), ClientError> {
+        let mut message = match async_id {
+            Some(async_id) => {
+                CancelRequest.encode_async_message(message_id, self.session_id, async_id)
+            }
+            None => CancelRequest.encode_sync_message(message_id, self.session_id),
+        };
         sign_request(self, &mut message, "CANCEL")?;
         self.connection.transport.send_message(&message).await
     }
@@ -243,14 +278,16 @@ where
 
 async fn send_cancel_requests<T: Transport>(
     session: &mut SessionConnection<T>,
-    pending: &[PendingRead],
+    pending: &mut [PendingRead],
     completed: &[Option<Vec<u8>>],
 ) -> Result<(), ClientError> {
-    for (request, result) in pending.iter().zip(completed) {
+    for (request, result) in pending.iter_mut().zip(completed) {
         if result.is_none() {
+            let async_id = request.async_state.async_id();
             session
-                .send_cancel_for_message_id(request.message_id)
+                .send_cancel_for_message_id(request.message_id, async_id)
                 .await?;
+            request.async_cancel_sent = async_id.is_some();
         }
     }
     Ok(())
@@ -328,38 +365,6 @@ fn verify_response<T>(
         ));
     }
     Ok(())
-}
-
-fn validate_read_header<T>(
-    session: &SessionConnection<T>,
-    file: &FileHandle,
-    header: &Smb2Header,
-    message_id: u64,
-) -> Result<(), ClientError> {
-    if header.command != Command::Read {
-        return Err(ClientError::Protocol(
-            "READ response command does not match request",
-        ));
-    }
-    if header.message_id != message_id {
-        return Err(ClientError::Protocol(
-            "READ response MessageId does not match request",
-        ));
-    }
-    if header.session_id != session.session_id {
-        return Err(ClientError::Protocol(
-            "READ response SessionId does not match session",
-        ));
-    }
-    match header.id {
-        HeaderId::Sync { tree_id, .. } if tree_id == file.tree_id() => Ok(()),
-        HeaderId::Sync { .. } => Err(ClientError::Protocol(
-            "READ response TreeId does not match file tree",
-        )),
-        HeaderId::Async { .. } => Err(ClientError::Protocol(
-            "READ response unexpectedly used async header form",
-        )),
-    }
 }
 
 fn read_target_len(file: &FileHandle, offset: u64, length: usize) -> Result<usize, ClientError> {
