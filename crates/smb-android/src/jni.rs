@@ -41,11 +41,7 @@ fn throw_io<T: Default>(env: &mut Env<'_>, error: impl Display) -> JniResult<T> 
 }
 
 fn throw_argument<T: Default>(env: &mut Env<'_>, message: impl Display) -> JniResult<T> {
-    throw_exception(
-        env,
-        jni_str!("java/lang/IllegalArgumentException"),
-        message,
-    )
+    throw_exception(env, jni_str!("java/lang/IllegalArgumentException"), message)
 }
 
 fn video_handle(env: &mut Env<'_>, raw: jlong) -> JniResult<Option<VideoHandle>> {
