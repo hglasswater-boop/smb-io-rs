@@ -36,7 +36,9 @@ impl fmt::Display for BrokerError {
         match self {
             Self::Stream(error) => write!(f, "stream error: {error}"),
             Self::Closed => f.write_str("video broker is closed"),
-            Self::StaleGeneration => f.write_str("video broker request belongs to a stale seek generation"),
+            Self::StaleGeneration => {
+                f.write_str("video broker request belongs to a stale seek generation")
+            }
             Self::InvalidConfig(message) => write!(f, "invalid broker configuration: {message}"),
         }
     }
@@ -117,11 +119,7 @@ impl VideoBrokerHandle {
         self.generation.advance()
     }
 
-    pub async fn read(
-        &self,
-        offset: u64,
-        length: usize,
-    ) -> Result<Vec<u8>, BrokerError> {
+    pub async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, BrokerError> {
         let generation = self.generation.current();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
