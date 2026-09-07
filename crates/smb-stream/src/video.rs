@@ -1,9 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use smb_io_client::{
-    ClientError, FileHandle, PipelinedReadOptions, SessionConnection, Transport,
-};
+use smb_io_client::{ClientError, FileHandle, PipelinedReadOptions, SessionConnection, Transport};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VideoReaderConfig {
@@ -82,7 +80,8 @@ impl CachedWindow {
         if !self.contains(offset, length)? {
             return Ok(None);
         }
-        let relative = usize::try_from(offset - self.start).map_err(|_| StreamError::OffsetOverflow)?;
+        let relative =
+            usize::try_from(offset - self.start).map_err(|_| StreamError::OffsetOverflow)?;
         let end = relative
             .checked_add(length)
             .ok_or(StreamError::OffsetOverflow)?;
@@ -169,7 +168,8 @@ impl VideoReader {
                     self.last_request_end = Some(
                         offset
                             .checked_add(
-                                u64::try_from(data.len()).map_err(|_| StreamError::OffsetOverflow)?,
+                                u64::try_from(data.len())
+                                    .map_err(|_| StreamError::OffsetOverflow)?,
                             )
                             .ok_or(StreamError::OffsetOverflow)?,
                     );
@@ -208,9 +208,7 @@ impl VideoReader {
         let result = fetched[..returned_len].to_vec();
         self.last_request_end = Some(
             offset
-                .checked_add(
-                    u64::try_from(returned_len).map_err(|_| StreamError::OffsetOverflow)?,
-                )
+                .checked_add(u64::try_from(returned_len).map_err(|_| StreamError::OffsetOverflow)?)
                 .ok_or(StreamError::OffsetOverflow)?,
         );
 
