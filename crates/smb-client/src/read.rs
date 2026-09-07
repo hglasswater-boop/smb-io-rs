@@ -227,12 +227,12 @@ where
                     .connection
                     .reserve_credits(credit_charge, options.credit_request)?;
                 let message_id = self.connection.message_ids.allocate(credit_charge)?;
-                let request_offset = offset
-                    .checked_add(
-                        u64::try_from(out.len() + scheduled)
-                            .map_err(|_| ClientError::Protocol("READ offset conversion overflow"))?,
-                    )
-                    .ok_or(ClientError::Protocol("READ offset overflow"))?;
+                let request_offset =
+                    offset
+                        .checked_add(u64::try_from(out.len() + scheduled).map_err(|_| {
+                            ClientError::Protocol("READ offset conversion overflow")
+                        })?)
+                        .ok_or(ClientError::Protocol("READ offset overflow"))?;
                 let request = ReadRequest::direct(
                     file.file_id(),
                     request_offset,
@@ -297,8 +297,7 @@ where
                         }
                         if response.data.len() < pending[position].chunk_len {
                             short_response_at = Some(
-                                short_response_at
-                                    .map_or(position, |current| current.min(position)),
+                                short_response_at.map_or(position, |current| current.min(position)),
                             );
                         }
                         completed[position] = Some(response.data);
