@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use smb_io_client::{ClientError, FileHandle, ReadCancellationToken, SessionConnection, Transport};
+use smb_io_client::{FileHandle, ReadCancellationToken, SessionConnection, Transport};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{StreamError, VideoReader, VideoReaderConfig};
@@ -206,7 +206,11 @@ where
 
         match result {
             Ok(data) if self.cancellation.is_current(generation) => Ok(data),
-            Ok(_) | Err(StreamError::Client(ClientError::Cancelled)) => {
+            Ok(_) => {
+                self.reader.invalidate();
+                Err(BrokerError::StaleGeneration)
+            }
+            Err(error) if error.is_cancelled() => {
                 self.reader.invalidate();
                 Err(BrokerError::StaleGeneration)
             }
@@ -235,7 +239,11 @@ where
 
         match result {
             Ok(_) if self.cancellation.is_current(generation) => Ok(()),
-            Ok(_) | Err(StreamError::Client(ClientError::Cancelled)) => {
+            Ok(_) => {
+                self.reader.invalidate();
+                Err(BrokerError::StaleGeneration)
+            }
+            Err(error) if error.is_cancelled() => {
                 self.reader.invalidate();
                 Err(BrokerError::StaleGeneration)
             }
