@@ -84,7 +84,9 @@ impl AuthProvider for AnonymousNtlmProvider {
                 let challenge_flags = parse_challenge_flags(challenge)?;
                 self.state = ProviderState::Complete;
                 Ok(AuthStep {
-                    token: encode_neg_token_resp_ntlm(&build_authenticate_message(challenge_flags)?),
+                    token: encode_neg_token_resp_ntlm(&build_authenticate_message(
+                        challenge_flags,
+                    )?),
                     state: AuthState::Complete,
                 })
             }
@@ -151,9 +153,9 @@ fn append_security_buffer(
         .map_err(|_| AuthError::Failed("anonymous NTLM payload exceeds 65535 bytes"))?;
     let payload_offset = u32::try_from(payload_offset)
         .map_err(|_| AuthError::Failed("anonymous NTLM message exceeds 4 GiB"))?;
-    let end = field_offset
-        .checked_add(8)
-        .ok_or(AuthError::Failed("anonymous NTLM security-buffer offset overflow"))?;
+    let end = field_offset.checked_add(8).ok_or(AuthError::Failed(
+        "anonymous NTLM security-buffer offset overflow",
+    ))?;
     if end > message.len() {
         return Err(AuthError::Failed(
             "anonymous NTLM security-buffer header is truncated",
@@ -169,7 +171,9 @@ fn append_security_buffer(
 fn read_u32(input: &[u8], offset: usize) -> Result<u32, AuthError> {
     let bytes = input
         .get(offset..offset + 4)
-        .ok_or(AuthError::InvalidToken("truncated anonymous NTLM u32 field"))?;
+        .ok_or(AuthError::InvalidToken(
+            "truncated anonymous NTLM u32 field",
+        ))?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
