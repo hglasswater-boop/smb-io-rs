@@ -7,6 +7,7 @@
 //! policy, platform bindings, or application caching.
 
 mod cancel;
+mod close;
 mod create;
 mod error;
 mod frame;
@@ -17,6 +18,10 @@ mod session_setup;
 mod tree_connect;
 
 pub use cancel::{CANCEL_REQUEST_FIXED_SIZE, CANCEL_REQUEST_STRUCTURE_SIZE, CancelRequest};
+pub use close::{
+    CLOSE_REQUEST_FIXED_SIZE, CLOSE_REQUEST_STRUCTURE_SIZE, CLOSE_RESPONSE_FIXED_SIZE,
+    CLOSE_RESPONSE_STRUCTURE_SIZE, CloseRequest, CloseResponse, close_flags,
+};
 pub use create::{
     CREATE_REQUEST_FIXED_SIZE, CREATE_REQUEST_STRUCTURE_SIZE, CREATE_RESPONSE_FIXED_SIZE,
     CREATE_RESPONSE_STRUCTURE_SIZE, CreateRequest, CreateResponse, FileId, create_action,
