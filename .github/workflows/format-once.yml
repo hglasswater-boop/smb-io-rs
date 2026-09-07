@@ -1,8 +1,7 @@
 name: Format Once
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
