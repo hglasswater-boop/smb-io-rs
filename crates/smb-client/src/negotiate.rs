@@ -3,7 +3,10 @@ use smb_io_wire::{
     capabilities, context_type, preauth_hash_algorithm, security_mode,
 };
 
-use crate::{ClientError, MessageIdAllocator, PreauthIntegrityHash, SigningAlgorithm, Transport};
+use crate::{
+    ClientError, CreditManager, MessageIdAllocator, PreauthIntegrityHash, SigningAlgorithm,
+    Transport,
+};
 
 #[derive(Debug, Clone)]
 pub struct NegotiateConfig {
@@ -85,6 +88,10 @@ impl NegotiatedParameters {
     pub fn signing_required(&self) -> bool {
         self.require_signing
     }
+
+    pub fn supports_multi_credit(&self) -> bool {
+        self.dialect != Dialect::Smb202 && self.capabilities & capabilities::LARGE_MTU != 0
+    }
 }
 
 pub struct Connection<T> {
@@ -92,6 +99,7 @@ pub struct Connection<T> {
     pub(crate) message_ids: MessageIdAllocator,
     pub(crate) negotiated: Option<NegotiatedParameters>,
     pub(crate) preauth_hash: Option<PreauthIntegrityHash>,
+    pub(crate) credits: Option<CreditManager>,
 }
 
 impl<T> Connection<T>
@@ -104,6 +112,7 @@ where
             message_ids: MessageIdAllocator::new(),
             negotiated: None,
             preauth_hash: None,
+            credits: None,
         }
     }
 
@@ -113,6 +122,36 @@ where
 
     pub fn preauth_hash(&self) -> Option<&PreauthIntegrityHash> {
         self.preauth_hash.as_ref()
+    }
+
+    pub fn available_credits(&self) -> Option<u32> {
+        self.credits.as_ref().map(CreditManager::available)
+    }
+
+    pub(crate) fn single_request_credit_charge(&self) -> Result<u16, ClientError> {
+        let negotiated = self.negotiated.as_ref().ok_or(ClientError::Protocol(
+            "credit calculation requires negotiated parameters",
+        ))?;
+        Ok(if negotiated.supports_multi_credit() { 1 } else { 0 })
+    }
+
+    pub(crate) fn reserve_credits(
+        &mut self,
+        credit_charge: u16,
+        minimum_credit_request: u16,
+    ) -> Result<u16, ClientError> {
+        let credits = self.credits.as_mut().ok_or(ClientError::Protocol(
+            "SMB credit window is not initialized",
+        ))?;
+        credits.reserve(credit_charge)?;
+        Ok(credits.request_hint(minimum_credit_request))
+    }
+
+    pub(crate) fn grant_credits(&mut self, credit_response: u16) -> Result<(), ClientError> {
+        let credits = self.credits.as_mut().ok_or(ClientError::Protocol(
+            "SMB credit window is not initialized",
+        ))?;
+        credits.grant(credit_response)
     }
 
     pub fn into_transport(self) -> T {
@@ -205,7 +244,9 @@ where
             ));
         }
 
+        let credits = CreditManager::new(parameters.initial_credits)?;
         self.preauth_hash = preauth_hash;
+        self.credits = Some(credits);
         self.negotiated = Some(parameters);
         self.negotiated.as_ref().ok_or(ClientError::Protocol(
             "failed to store negotiated parameters",
