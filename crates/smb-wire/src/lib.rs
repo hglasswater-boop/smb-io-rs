@@ -11,6 +11,7 @@ mod frame;
 mod header;
 mod negotiate;
 mod session_setup;
+mod tree_connect;
 
 pub use error::WireError;
 pub use frame::{
@@ -29,6 +30,11 @@ pub use session_setup::{
     SESSION_SETUP_REQUEST_FIXED_SIZE, SESSION_SETUP_REQUEST_STRUCTURE_SIZE,
     SESSION_SETUP_RESPONSE_FIXED_SIZE, SESSION_SETUP_RESPONSE_STRUCTURE_SIZE, SessionSetupRequest,
     SessionSetupResponse, request_flags, session_flags,
+};
+pub use tree_connect::{
+    TREE_CONNECT_REQUEST_FIXED_SIZE, TREE_CONNECT_REQUEST_STRUCTURE_SIZE,
+    TREE_CONNECT_RESPONSE_FIXED_SIZE, TREE_CONNECT_RESPONSE_STRUCTURE_SIZE, TreeConnectRequest,
+    TreeConnectResponse, share_capabilities, share_flags, share_type, tree_connect_flags,
 };
 
 /// SMB2 protocol identifier (`0xFE 'S' 'M' 'B'`).
