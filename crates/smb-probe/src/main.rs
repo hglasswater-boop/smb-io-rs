@@ -40,23 +40,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "verify-reconnect" => {
             let request = ReconnectVerifyRequest {
                 host: args.next().ok_or_else(reconnect_usage)?,
-                port: args
-                    .next()
-                    .ok_or_else(reconnect_usage)?
-                    .parse::<u16>()?,
+                port: args.next().ok_or_else(reconnect_usage)?.parse::<u16>()?,
                 share: args.next().ok_or_else(reconnect_usage)?,
                 path: args.next().ok_or_else(reconnect_usage)?,
                 username: dash_to_empty(args.next().ok_or_else(reconnect_usage)?),
                 password: dash_to_empty(args.next().ok_or_else(reconnect_usage)?),
-                first_offset: args
-                    .next()
-                    .ok_or_else(reconnect_usage)?
-                    .parse::<u64>()?,
+                first_offset: args.next().ok_or_else(reconnect_usage)?.parse::<u64>()?,
                 first_expected: parse_hex(&args.next().ok_or_else(reconnect_usage)?)?,
-                second_offset: args
-                    .next()
-                    .ok_or_else(reconnect_usage)?
-                    .parse::<u64>()?,
+                second_offset: args.next().ok_or_else(reconnect_usage)?.parse::<u64>()?,
                 second_expected: parse_hex(&args.next().ok_or_else(reconnect_usage)?)?,
                 ready_file: PathBuf::from(args.next().ok_or_else(reconnect_usage)?),
                 resume_file: PathBuf::from(args.next().ok_or_else(reconnect_usage)?),
@@ -182,8 +173,6 @@ async fn run_verify(request: VerifyRequest) -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    // Public random-access semantics must turn EOF into an empty result rather than an error or
-    // integer wrap. The wire layer separately handles STATUS_END_OF_FILE from the server.
     if !session.read_at(&file, file.len(), 1).await?.is_empty() {
         return Err("direct read at EOF returned data".into());
     }
@@ -210,8 +199,6 @@ async fn run_verify(request: VerifyRequest) -> Result<(), Box<dyn Error>> {
 fn run_reconnect_verify_on_plain_thread(
     request: ReconnectVerifyRequest,
 ) -> Result<(), Box<dyn Error>> {
-    // AndroidEngine owns a Tokio Runtime and synchronously calls block_on. Run it outside the
-    // probe's #[tokio::main] runtime so nested-runtime protection cannot interfere with the test.
     let task = std::thread::spawn(move || {
         run_reconnect_verify(request).map_err(|error| error.to_string())
     });
