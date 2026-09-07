@@ -77,6 +77,10 @@ where
         self.connection.negotiated.as_ref()
     }
 
+    pub fn available_credits(&self) -> Option<u32> {
+        self.connection.available_credits()
+    }
+
     /// SMB 3.1.1 session preauthentication hash used for key derivation.
     ///
     /// It includes the final SESSION_SETUP request but intentionally excludes the final successful
@@ -142,15 +146,19 @@ where
                 previous_session_id: config.previous_session_id,
                 security_blob: core::mem::take(&mut step.token),
             };
-            let message_id = self.message_ids.allocate(0)?;
-            let request_message =
-                request.encode_message(message_id, session_id, config.credit_request)?;
+            let credit_charge = self.single_request_credit_charge()?;
+            let credit_request = self.reserve_credits(credit_charge, config.credit_request)?;
+            let message_id = self.message_ids.allocate(credit_charge)?;
+            let mut request_message =
+                request.encode_message(message_id, session_id, credit_request)?;
+            set_credit_charge(&mut request_message, credit_charge);
             update_preauth(&mut self.preauth_hash, &request_message);
 
             self.transport.send_message(&request_message).await?;
             let mut response_message = self.transport.receive_message().await?;
 
             let response_header = Smb2Header::decode(&response_message)?;
+            self.grant_credits(response_header.credits)?;
             if response_header.command != Command::SessionSetup {
                 return Err(ClientError::Protocol(
                     "SESSION_SETUP response command does not match request",
@@ -272,6 +280,10 @@ where
             "SESSION_SETUP exceeded the configured authentication round limit",
         ))
     }
+}
+
+fn set_credit_charge(message: &mut [u8], credit_charge: u16) {
+    message[6..8].copy_from_slice(&credit_charge.to_le_bytes());
 }
 
 fn validate_session_id(current: u64, received: u64) -> Result<(), ClientError> {
