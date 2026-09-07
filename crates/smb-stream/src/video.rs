@@ -1,7 +1,10 @@
 use std::error::Error;
 use std::fmt;
 
-use smb_io_client::{ClientError, FileHandle, PipelinedReadOptions, SessionConnection, Transport};
+use smb_io_client::{
+    ClientError, FileHandle, PipelinedReadOptions, ReadCancellationToken, SessionConnection,
+    Transport,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VideoReaderConfig {
@@ -157,6 +160,43 @@ impl VideoReader {
     where
         T: Transport,
     {
+        self.read_impl(session, file, offset, length, None).await
+    }
+
+    pub async fn read_cancelable<T>(
+        &mut self,
+        session: &mut SessionConnection<T>,
+        file: &FileHandle,
+        offset: u64,
+        length: usize,
+        cancellation: &ReadCancellationToken,
+        generation: u64,
+    ) -> Result<Vec<u8>, StreamError>
+    where
+        T: Transport,
+    {
+        self.read_impl(
+            session,
+            file,
+            offset,
+            length,
+            Some((cancellation, generation)),
+        )
+        .await
+    }
+
+    async fn read_impl<T>(
+        &mut self,
+        session: &mut SessionConnection<T>,
+        file: &FileHandle,
+        offset: u64,
+        length: usize,
+        cancellation: Option<(&ReadCancellationToken, u64)>,
+    ) -> Result<Vec<u8>, StreamError>
+    where
+        T: Transport,
+    {
+        ensure_not_cancelled(cancellation)?;
         if length == 0 || offset >= file.len() {
             return Ok(Vec::new());
         }
@@ -165,6 +205,7 @@ impl VideoReader {
         if let Some(cache) = self.cache.as_ref() {
             if cache.generation == self.generation {
                 if let Some(data) = cache.slice(offset, target)? {
+                    ensure_not_cancelled(cancellation)?;
                     self.last_request_end = Some(
                         offset
                             .checked_add(
@@ -192,15 +233,26 @@ impl VideoReader {
                 .min(self.config.max_cache_bytes)
                 .min(remaining)
         };
-        let generation = self.generation;
-        let fetched = session
-            .read_at_pipelined_with_options(file, offset, fetch_len, self.config.pipeline)
-            .await?;
+        let reader_generation = self.generation;
+        let fetched = if let Some((token, generation)) = cancellation {
+            session
+                .read_at_pipelined_cancelable_with_options(
+                    file,
+                    offset,
+                    fetch_len,
+                    self.config.pipeline,
+                    token,
+                    generation,
+                )
+                .await?
+        } else {
+            session
+                .read_at_pipelined_with_options(file, offset, fetch_len, self.config.pipeline)
+                .await?
+        };
 
-        // `read` currently owns &mut self for the whole await, so the generation cannot change in
-        // parallel yet. Keeping the check here makes the cache rule explicit for the future broker
-        // that will allow seek/cancel messages while prefetch is in flight.
-        if generation != self.generation {
+        ensure_not_cancelled(cancellation)?;
+        if reader_generation != self.generation {
             return Ok(Vec::new());
         }
 
@@ -214,7 +266,7 @@ impl VideoReader {
 
         if fetched.len() <= self.config.max_cache_bytes {
             self.cache = Some(CachedWindow {
-                generation,
+                generation: reader_generation,
                 start: offset,
                 data: fetched,
             });
@@ -246,6 +298,17 @@ impl VideoReader {
     fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
+}
+
+fn ensure_not_cancelled(
+    cancellation: Option<(&ReadCancellationToken, u64)>,
+) -> Result<(), StreamError> {
+    if let Some((token, generation)) = cancellation {
+        if !token.is_current(generation) {
+            return Err(StreamError::Client(ClientError::Cancelled));
+        }
+    }
+    Ok(())
 }
 
 fn validate_config(config: VideoReaderConfig) -> Result<(), StreamError> {
@@ -318,5 +381,16 @@ mod tests {
             ..VideoReaderConfig::default()
         };
         assert!(VideoReader::new(config).is_err());
+    }
+
+    #[test]
+    fn stale_external_generation_is_rejected_before_network_io() {
+        let token = ReadCancellationToken::new();
+        let generation = token.generation();
+        token.advance();
+        assert!(matches!(
+            ensure_not_cancelled(Some((&token, generation))),
+            Err(StreamError::Client(ClientError::Cancelled))
+        ));
     }
 }
