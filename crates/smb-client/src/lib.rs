@@ -6,6 +6,7 @@
 //! SMB Credits, outstanding request dispatch, signing/security transforms, timeouts,
 //! cancellation, reconnect coordination, and protocol metrics.
 
+mod credits;
 mod error;
 mod file;
 mod message_id;
@@ -16,6 +17,7 @@ mod signing;
 mod transport;
 mod tree;
 
+pub use credits::CreditManager;
 pub use error::ClientError;
 pub use file::{FileHandle, FileOpenOptions};
 pub use message_id::MessageIdAllocator;
