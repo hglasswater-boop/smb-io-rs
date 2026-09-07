@@ -1,6 +1,6 @@
 use smb_io_auth::{AuthMechanism, AuthProvider, AuthState, SecretBytes};
 use smb_io_wire::{
-    Command, SessionSetupRequest, SessionSetupResponse, Smb2Header, StatusField, flags,
+    Command, Dialect, SessionSetupRequest, SessionSetupResponse, Smb2Header, StatusField, flags,
     security_mode, session_flags,
 };
 
@@ -247,6 +247,10 @@ where
                     "server signed SESSION_SETUP without an available signing key",
                 ))?;
                 signing.verify(&mut response_message)?;
+            } else if negotiated.dialect == Dialect::Smb311 {
+                return Err(ClientError::Protocol(
+                    "SMB 3.1.1 final SESSION_SETUP response must be signed",
+                ));
             } else if signing_required {
                 return Err(ClientError::Protocol(
                     "server omitted a required SESSION_SETUP signature",
