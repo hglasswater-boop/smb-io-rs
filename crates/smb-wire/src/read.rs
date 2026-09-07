@@ -9,6 +9,7 @@ pub const READ_REQUEST_STRUCTURE_SIZE: u16 = 49;
 pub const READ_REQUEST_FIXED_SIZE: usize = 48;
 pub const READ_RESPONSE_STRUCTURE_SIZE: u16 = 17;
 pub const READ_RESPONSE_FIXED_SIZE: usize = 16;
+pub const READ_DEFAULT_DATA_OFFSET: u8 = 0x50;
 
 pub mod read_request_flags {
     pub const NONE: u8 = 0x00;
@@ -42,7 +43,7 @@ pub struct ReadRequest {
 impl ReadRequest {
     pub fn direct(file_id: FileId, offset: u64, length: u32) -> Self {
         Self {
-            padding: 0,
+            padding: READ_DEFAULT_DATA_OFFSET,
             flags: read_request_flags::NONE,
             length,
             offset,
@@ -57,7 +58,8 @@ impl ReadRequest {
         if self.file_id.is_zero() {
             return Err(WireError::InvalidField("READ FileId"));
         }
-        if self.flags & !(read_request_flags::READ_UNBUFFERED | read_request_flags::REQUEST_COMPRESSED)
+        if self.flags
+            & !(read_request_flags::READ_UNBUFFERED | read_request_flags::REQUEST_COMPRESSED)
             != 0
         {
             return Err(WireError::InvalidField("READ Flags"));
@@ -201,12 +203,16 @@ mod tests {
         assert!(matches!(header.id, HeaderId::Sync { tree_id: 9, .. }));
         let body = &message[SMB2_HEADER_SIZE..];
         assert_eq!(get_u16(body, 0), READ_REQUEST_STRUCTURE_SIZE);
+        assert_eq!(body[2], READ_DEFAULT_DATA_OFFSET);
         assert_eq!(get_u32(body, 4), 1024 * 1024);
         assert_eq!(
             u64::from_le_bytes(body[8..16].try_into().unwrap()),
             4 * 1024 * 1024 * 1024
         );
-        assert_eq!(message.len(), SMB2_HEADER_SIZE + READ_REQUEST_FIXED_SIZE + 1);
+        assert_eq!(
+            message.len(),
+            SMB2_HEADER_SIZE + READ_REQUEST_FIXED_SIZE + 1
+        );
     }
 
     #[test]
@@ -222,7 +228,7 @@ mod tests {
         let mut message = header.encode().to_vec();
         let mut body = vec![0u8; READ_RESPONSE_FIXED_SIZE];
         put_u16(&mut body, 0, READ_RESPONSE_STRUCTURE_SIZE);
-        body[2] = 80;
+        body[2] = READ_DEFAULT_DATA_OFFSET;
         put_u32(&mut body, 4, 5);
         put_u32(&mut body, 8, 0);
         put_u32(&mut body, 12, read_response_flags::NONE);
