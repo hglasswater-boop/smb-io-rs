@@ -252,10 +252,7 @@ pub async fn connect_read_only_file(
         let mut durable_state = recipe.durable.lock().await;
 
         if let Some(existing) = durable_state.handle.clone() {
-            match session
-                .reconnect_file_durable_v2(&tree, &existing)
-                .await
-            {
+            match session.reconnect_file_durable_v2(&tree, &existing).await {
                 Ok(refreshed) => {
                     let file = refreshed.file().clone();
                     if let Err(error) = recipe.remember_or_validate_file(&file) {
