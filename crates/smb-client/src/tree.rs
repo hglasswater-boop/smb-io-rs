@@ -70,14 +70,15 @@ where
         options: TreeConnectOptions,
     ) -> Result<TreeHandle, ClientError> {
         let path = path.into();
-        let negotiated = self
+        let dialect = self
             .connection
             .negotiated
             .as_ref()
             .ok_or(ClientError::Protocol(
                 "TREE_CONNECT requires negotiated parameters",
-            ))?;
-        if negotiated.dialect != Dialect::Smb311 && options.flags != 0 {
+            ))?
+            .dialect;
+        if dialect != Dialect::Smb311 && options.flags != 0 {
             return Err(ClientError::Protocol(
                 "TREE_CONNECT flags are only valid for SMB 3.1.1",
             ));
@@ -106,7 +107,7 @@ where
             request.encode_message(message_id, self.session_id, credit_request)?;
         set_credit_charge(&mut request_message, credit_charge);
 
-        let smb311_tree_signing = negotiated.dialect == Dialect::Smb311
+        let smb311_tree_signing = dialect == Dialect::Smb311
             && self.mechanism != smb_io_auth::AuthMechanism::Anonymous
             && self.session_flags & (session_flags::IS_GUEST | session_flags::IS_NULL) == 0;
         let request_signed = self.signing_required || smb311_tree_signing;
