@@ -7,6 +7,7 @@
 //! cancellation, reconnect coordination, and protocol metrics.
 
 mod error;
+mod file;
 mod message_id;
 mod negotiate;
 mod preauth;
@@ -16,6 +17,7 @@ mod transport;
 mod tree;
 
 pub use error::ClientError;
+pub use file::{FileHandle, FileOpenOptions};
 pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
