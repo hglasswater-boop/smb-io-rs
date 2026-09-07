@@ -17,6 +17,7 @@ smb-io-stream = { path = "../smb-stream" }
 getrandom = "0.3"
 jni = "0.22"
 tokio = { version = "1.40", features = ["rt-multi-thread", "time", "net"] }
+zeroize = "1.8"
 
 [lints.clippy]
 all = "warn"
