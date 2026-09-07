@@ -1,7 +1,6 @@
-use smb_io_wire::{
-    Command, HeaderId, ReadRequest, ReadResponse, Smb2Header, StatusField, flags, session_flags,
-};
+use smb_io_wire::{ReadRequest, ReadResponse, Smb2Header, StatusField, flags, session_flags};
 
+use crate::read_async::{AsyncReadState, ReadResponsePhase};
 use crate::{ClientError, FileHandle, SessionConnection, Transport};
 
 pub const STATUS_END_OF_FILE: u32 = 0xC000_0011;
@@ -45,6 +44,7 @@ impl Default for PipelinedReadOptions {
 struct PendingRead {
     message_id: u64,
     chunk_len: usize,
+    async_state: AsyncReadState,
 }
 
 impl<T> SessionConnection<T>
@@ -114,11 +114,24 @@ where
                 .transport
                 .send_message(&request_message)
                 .await?;
-            let mut response_message = self.connection.transport.receive_message().await?;
-            let header = Smb2Header::decode(&response_message)?;
-            self.validate_read_header(file, &header, message_id)?;
-            self.connection.grant_credits(header.credits)?;
-            self.verify_read_response(&mut response_message, &header)?;
+
+            let mut async_state = AsyncReadState::default();
+            let (response_message, header) = loop {
+                let mut response_message = self.connection.transport.receive_message().await?;
+                let header = Smb2Header::decode(&response_message)?;
+                let phase = async_state.validate(
+                    file.tree_id(),
+                    self.session_id,
+                    message_id,
+                    &header,
+                )?;
+                self.connection.grant_credits(header.credits)?;
+                self.verify_read_response(&mut response_message, &header)?;
+                if phase == ReadResponsePhase::InterimPending {
+                    continue;
+                }
+                break (response_message, header);
+            };
 
             match header.status {
                 StatusField::Status(0) => {}
@@ -160,7 +173,8 @@ where
     /// Reads a random-access window with several SMB READ requests outstanding at once.
     ///
     /// Requests are sent back-to-back before responses are collected. SMB servers may complete
-    /// them out of order, so responses are correlated by MessageId and reassembled in file order.
+    /// them out of order or transition an individual request through STATUS_PENDING, so responses
+    /// are correlated by MessageId/AsyncId and reassembled in file order.
     pub async fn read_at_pipelined(
         &mut self,
         file: &FileHandle,
@@ -255,6 +269,7 @@ where
                 pending.push(PendingRead {
                     message_id,
                     chunk_len,
+                    async_state: AsyncReadState::default(),
                 });
                 scheduled += chunk_len;
             }
@@ -267,8 +282,9 @@ where
 
             let mut completed = vec![None; pending.len()];
             let mut short_response_at: Option<usize> = None;
+            let mut received = 0usize;
 
-            for _ in 0..pending.len() {
+            while received < pending.len() {
                 let mut response_message = self.connection.transport.receive_message().await?;
                 let header = Smb2Header::decode(&response_message)?;
                 let position = pending
@@ -279,13 +295,21 @@ where
                     ))?;
                 if completed[position].is_some() {
                     return Err(ClientError::Protocol(
-                        "pipelined READ received a duplicate response",
+                        "pipelined READ received a duplicate final response",
                     ));
                 }
 
-                self.validate_read_header(file, &header, pending[position].message_id)?;
+                let phase = pending[position].async_state.validate(
+                    file.tree_id(),
+                    self.session_id,
+                    pending[position].message_id,
+                    &header,
+                )?;
                 self.connection.grant_credits(header.credits)?;
                 self.verify_read_response(&mut response_message, &header)?;
+                if phase == ReadResponsePhase::InterimPending {
+                    continue;
+                }
 
                 match header.status {
                     StatusField::Status(0) => {
@@ -315,6 +339,7 @@ where
                         ));
                     }
                 }
+                received += 1;
             }
 
             for (position, data) in completed.into_iter().enumerate() {
@@ -391,38 +416,6 @@ where
             ));
         }
         Ok(())
-    }
-
-    fn validate_read_header(
-        &self,
-        file: &FileHandle,
-        header: &Smb2Header,
-        message_id: u64,
-    ) -> Result<(), ClientError> {
-        if header.command != Command::Read {
-            return Err(ClientError::Protocol(
-                "READ response command does not match request",
-            ));
-        }
-        if header.message_id != message_id {
-            return Err(ClientError::Protocol(
-                "READ response MessageId does not match request",
-            ));
-        }
-        if header.session_id != self.session_id {
-            return Err(ClientError::Protocol(
-                "READ response SessionId does not match session",
-            ));
-        }
-        match header.id {
-            HeaderId::Sync { tree_id, .. } if tree_id == file.tree_id() => Ok(()),
-            HeaderId::Sync { .. } => Err(ClientError::Protocol(
-                "READ response TreeId does not match file tree",
-            )),
-            HeaderId::Async { .. } => Err(ClientError::Protocol(
-                "READ response unexpectedly used async header form",
-            )),
-        }
     }
 }
 
