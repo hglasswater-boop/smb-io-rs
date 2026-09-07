@@ -209,13 +209,10 @@ mod tests {
             let (_socket, _) = listener.accept().await.unwrap();
         });
 
-        let mut transport = TcpTransport::connect(
-            "127.0.0.1",
-            address.port(),
-            TcpTransportConfig::default(),
-        )
-        .await
-        .unwrap();
+        let mut transport =
+            TcpTransport::connect("127.0.0.1", address.port(), TcpTransportConfig::default())
+                .await
+                .unwrap();
         let future = transport.receive_message();
 
         // Regression guard: the previous 64 KiB async-local array made this future large enough
