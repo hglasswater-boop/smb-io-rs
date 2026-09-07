@@ -6,6 +6,8 @@
 //! SMB Credits, outstanding request dispatch, signing/security transforms, timeouts,
 //! cancellation, reconnect coordination, and protocol metrics.
 
+mod cancel;
+mod cancellation;
 mod credits;
 mod error;
 mod file;
@@ -18,6 +20,8 @@ mod signing;
 mod transport;
 mod tree;
 
+pub use cancel::STATUS_CANCELLED;
+pub use cancellation::ReadCancellationToken;
 pub use credits::CreditManager;
 pub use error::ClientError;
 pub use file::{FileHandle, FileOpenOptions};
