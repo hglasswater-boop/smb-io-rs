@@ -97,9 +97,14 @@ where
             flags: options.flags,
             path: path.clone(),
         };
-        let message_id = self.connection.message_ids.allocate(0)?;
+        let credit_charge = self.connection.single_request_credit_charge()?;
+        let credit_request = self
+            .connection
+            .reserve_credits(credit_charge, options.credit_request)?;
+        let message_id = self.connection.message_ids.allocate(credit_charge)?;
         let mut request_message =
-            request.encode_message(message_id, self.session_id, options.credit_request)?;
+            request.encode_message(message_id, self.session_id, credit_request)?;
+        set_credit_charge(&mut request_message, credit_charge);
 
         let smb311_tree_signing = negotiated.dialect == Dialect::Smb311
             && self.mechanism != smb_io_auth::AuthMechanism::Anonymous
@@ -133,6 +138,7 @@ where
                 "TREE_CONNECT response SessionId does not match session",
             ));
         }
+        self.connection.grant_credits(header.credits)?;
         match header.status {
             StatusField::Status(0) => {}
             StatusField::Status(status) => return Err(ClientError::ServerStatus(status)),
@@ -178,4 +184,8 @@ where
             maximal_access: response.maximal_access,
         })
     }
+}
+
+fn set_credit_charge(message: &mut [u8], credit_charge: u16) {
+    message[6..8].copy_from_slice(&credit_charge.to_le_bytes());
 }
