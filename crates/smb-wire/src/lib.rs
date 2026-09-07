@@ -10,6 +10,7 @@ mod cancel;
 mod close;
 mod create;
 mod create_context;
+mod create_with_contexts;
 mod durable;
 mod error;
 mod frame;
@@ -32,6 +33,9 @@ pub use create::{
 };
 pub use create_context::{
     CREATE_CONTEXT_FIXED_SIZE, CreateContext, decode_create_contexts, encode_create_contexts,
+};
+pub use create_with_contexts::{
+    decode_create_response_with_contexts, encode_create_request_with_contexts,
 };
 pub use durable::{
     DURABLE_HANDLE_RECONNECT_V2_DATA_SIZE, DURABLE_HANDLE_RECONNECT_V2_NAME,
