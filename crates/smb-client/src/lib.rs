@@ -24,7 +24,7 @@ pub use file::{FileHandle, FileOpenOptions};
 pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
-pub use read::{ReadOptions, STATUS_END_OF_FILE};
+pub use read::{PipelinedReadOptions, ReadOptions, STATUS_END_OF_FILE};
 pub use session::{
     STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
 };
