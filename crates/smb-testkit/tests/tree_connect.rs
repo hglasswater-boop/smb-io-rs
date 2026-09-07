@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use smb_io_auth::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, SecretBytes};
 use smb_io_client::{
     ClientError, Connection, Dialect, FileOpenOptions, NegotiateConfig, PipelinedReadOptions,
-    ReadCancellationToken, SessionSetupConfig, SigningAlgorithm, SigningState, Transport,
-    TreeConnectOptions, STATUS_CANCELLED,
+    ReadCancellationToken, STATUS_CANCELLED, SessionSetupConfig, SigningAlgorithm, SigningState,
+    Transport, TreeConnectOptions,
 };
 use smb_io_testkit::ScriptedTransport;
 use smb_io_wire::{

@@ -1,9 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use smb_io_client::{
-    ClientError, FileHandle, ReadCancellationToken, SessionConnection, Transport,
-};
+use smb_io_client::{ClientError, FileHandle, ReadCancellationToken, SessionConnection, Transport};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{StreamError, VideoReader, VideoReaderConfig};
