@@ -1,0 +1,96 @@
+name: Durable Reconnect
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - '.github/workflows/durable-reconnect.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - '.github/workflows/durable-reconnect.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  durable-reconnect:
+    name: DH2Q to TCP drop to DH2C
+    runs-on: ubuntu-latest
+    env:
+      SMB_PORT: '1445'
+      SMB_USER: smbtest
+      SMB_PASSWORD: 'XFiles-Rust-SMB-42!'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Samba
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y samba
+          sudo systemctl stop smbd nmbd 2>/dev/null || true
+          sudo pkill smbd 2>/dev/null || true
+
+      - name: Create account and durable fixture
+        run: |
+          set -eux
+          sudo useradd --no-create-home --shell /usr/sbin/nologin "$SMB_USER" 2>/dev/null || true
+          printf '%s\n%s\n' "$SMB_PASSWORD" "$SMB_PASSWORD" | sudo smbpasswd -s -a "$SMB_USER"
+          sudo rm -rf /tmp/smb-io-durable
+          sudo mkdir -p /tmp/smb-io-durable
+          printf 'XFILES_RUST_SMB_OK' | sudo tee /tmp/smb-io-durable/small.bin >/dev/null
+          sudo chown -R "$SMB_USER":"$SMB_USER" /tmp/smb-io-durable
+          sudo chmod -R a+rX /tmp/smb-io-durable
+
+      - name: Start signing-required SMB 3.1.1 server
+        run: |
+          cat > /tmp/smb-io-durable.conf <<EOF
+          [global]
+            server role = standalone server
+            workgroup = WORKGROUP
+            security = user
+            map to guest = Never
+            server min protocol = SMB3_00
+            server max protocol = SMB3_11
+            server signing = mandatory
+            smb ports = ${SMB_PORT}
+            interfaces = 127.0.0.1
+            bind interfaces only = yes
+            disable netbios = yes
+            log level = 3
+            log file = /tmp/smb-io-durable.log
+
+          [auth]
+            path = /tmp/smb-io-durable
+            read only = yes
+            guest ok = no
+            valid users = ${SMB_USER}
+          EOF
+          sudo smbd -D -s /tmp/smb-io-durable.conf
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          sudo cat /tmp/smb-io-durable.log || true
+          exit 1
+
+      - name: Verify DH2C after client TCP disconnect
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe --example durable_reconnect -- \
+            127.0.0.1 "$SMB_PORT" auth small.bin \
+            "$SMB_USER" "$SMB_PASSWORD" XFILES_RUST_SMB_OK \
+            | tee /tmp/durable-reconnect-probe.log
+          grep -q '^durable_initial_read: true$' /tmp/durable-reconnect-probe.log
+          grep -q '^durable_reconnect_verified: true$' /tmp/durable-reconnect-probe.log
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          cat /tmp/durable-reconnect-probe.log 2>/dev/null || true
+          sudo cat /tmp/smb-io-durable.log 2>/dev/null || true
