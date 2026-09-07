@@ -220,7 +220,8 @@ impl VideoReader {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, StreamError> {
-        self.read_recovering_impl(source, offset, length, None).await
+        self.read_recovering_impl(source, offset, length, None)
+            .await
     }
 
     /// Cancellation-aware reconnecting read. A seek generation change cancels both outstanding SMB
@@ -233,13 +234,8 @@ impl VideoReader {
         cancellation: &ReadCancellationToken,
         generation: u64,
     ) -> Result<Vec<u8>, StreamError> {
-        self.read_recovering_impl(
-            source,
-            offset,
-            length,
-            Some((cancellation, generation)),
-        )
-        .await
+        self.read_recovering_impl(source, offset, length, Some((cancellation, generation)))
+            .await
     }
 
     async fn read_impl<T>(
@@ -253,15 +249,16 @@ impl VideoReader {
     where
         T: Transport,
     {
-        let prepared = self.prepare_read(file.len(), offset, length, cancellation)?;
-        let PreparedRead::Fetch {
-            target,
-            fetch_len,
-            reader_generation,
-        } = prepared
-        else {
-            return prepared.into_result();
-        };
+        let (target, fetch_len, reader_generation) =
+            match self.prepare_read(file.len(), offset, length, cancellation)? {
+                PreparedRead::Empty => return Ok(Vec::new()),
+                PreparedRead::Cached(data) => return Ok(data),
+                PreparedRead::Fetch {
+                    target,
+                    fetch_len,
+                    reader_generation,
+                } => (target, fetch_len, reader_generation),
+            };
 
         let fetched = if let Some((token, generation)) = cancellation {
             session
@@ -280,13 +277,7 @@ impl VideoReader {
                 .await?
         };
 
-        self.finish_fetch(
-            offset,
-            target,
-            reader_generation,
-            fetched,
-            cancellation,
-        )
+        self.finish_fetch(offset, target, reader_generation, fetched, cancellation)
     }
 
     async fn read_recovering_impl(
@@ -296,15 +287,16 @@ impl VideoReader {
         length: usize,
         cancellation: Option<(&ReadCancellationToken, u64)>,
     ) -> Result<Vec<u8>, StreamError> {
-        let prepared = self.prepare_read(source.len(), offset, length, cancellation)?;
-        let PreparedRead::Fetch {
-            target,
-            fetch_len,
-            reader_generation,
-        } = prepared
-        else {
-            return prepared.into_result();
-        };
+        let (target, fetch_len, reader_generation) =
+            match self.prepare_read(source.len(), offset, length, cancellation)? {
+                PreparedRead::Empty => return Ok(Vec::new()),
+                PreparedRead::Cached(data) => return Ok(data),
+                PreparedRead::Fetch {
+                    target,
+                    fetch_len,
+                    reader_generation,
+                } => (target, fetch_len, reader_generation),
+            };
 
         let fetched = if let Some((token, generation)) = cancellation {
             source
@@ -322,13 +314,7 @@ impl VideoReader {
                 .await?
         };
 
-        self.finish_fetch(
-            offset,
-            target,
-            reader_generation,
-            fetched,
-            cancellation,
-        )
+        self.finish_fetch(offset, target, reader_generation, fetched, cancellation)
     }
 
     fn prepare_read(
@@ -426,18 +412,6 @@ impl VideoReader {
 
     fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-    }
-}
-
-impl PreparedRead {
-    fn into_result(self) -> Result<Vec<u8>, StreamError> {
-        match self {
-            Self::Empty => Ok(Vec::new()),
-            Self::Cached(data) => Ok(data),
-            Self::Fetch { .. } => Err(StreamError::InvalidConfig(
-                "internal fetch plan was not executed",
-            )),
-        }
     }
 }
 
