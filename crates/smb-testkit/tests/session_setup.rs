@@ -3,8 +3,9 @@ use smb_io_auth::{
     SecretBytes, ntlm_flags,
 };
 use smb_io_client::{
-    Connection, Dialect, NegotiateConfig, PreauthIntegrityHash, STATUS_MORE_PROCESSING_REQUIRED,
-    STATUS_SUCCESS, SessionSetupConfig, SigningAlgorithm, SigningState,
+    Connection, CreditManager, Dialect, NegotiateConfig, PreauthIntegrityHash,
+    STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionSetupConfig, SigningAlgorithm,
+    SigningState,
 };
 use smb_io_testkit::ScriptedTransport;
 use smb_io_wire::{
@@ -60,6 +61,10 @@ fn put_u32(out: &mut [u8], offset: usize, value: u32) {
 
 fn put_u64(out: &mut [u8], offset: usize, value: u64) {
     out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn set_credit_charge(message: &mut [u8], credit_charge: u16) {
+    message[6..8].copy_from_slice(&credit_charge.to_le_bytes());
 }
 
 fn negotiate_311_response() -> Vec<u8> {
@@ -177,30 +182,42 @@ fn signed_final_311_response_for_fake(
 ) -> Vec<u8> {
     let negotiate_request = modern_311_request(client_guid, preauth_salt);
     let negotiate_response = negotiate_311_response();
-    let first_request = SessionSetupRequest {
+
+    // Keep this fixture's SESSION_SETUP transcript byte-for-byte aligned with the client's credit
+    // accounting. Credit fields participate in the SMB 3.1.1 preauthentication hash.
+    let mut credits = CreditManager::new(32).unwrap();
+    credits.reserve(1).unwrap();
+    let first_credit_request = credits.request_hint(32);
+    let mut first_request = SessionSetupRequest {
         flags: 0,
         security_mode: security_mode::SIGNING_ENABLED as u8,
         capabilities: 0,
         previous_session_id: 0,
         security_blob: b"negotiate-token".to_vec(),
     }
-    .encode_message(1, 0, 32)
+    .encode_message(1, 0, first_credit_request)
     .unwrap();
+    set_credit_charge(&mut first_request, 1);
+
     let first_response = session_response(
         1,
         session_id,
         STATUS_MORE_PROCESSING_REQUIRED,
         b"challenge-token",
     );
-    let final_request = SessionSetupRequest {
+    credits.grant(16).unwrap();
+    credits.reserve(1).unwrap();
+    let final_credit_request = credits.request_hint(32);
+    let mut final_request = SessionSetupRequest {
         flags: 0,
         security_mode: security_mode::SIGNING_ENABLED as u8,
         capabilities: 0,
         previous_session_id: 0,
         security_blob: b"authenticate-token".to_vec(),
     }
-    .encode_message(2, session_id, 32)
+    .encode_message(2, session_id, final_credit_request)
     .unwrap();
+    set_credit_charge(&mut final_request, 1);
 
     let mut preauth = PreauthIntegrityHash::new();
     for message in [
@@ -336,8 +353,10 @@ async fn multi_round_session_setup_reuses_server_session_id_and_extends_preauth_
     let first_setup = Smb2Header::decode(&transport.sent_messages()[1]).unwrap();
     let second_setup = Smb2Header::decode(&transport.sent_messages()[2]).unwrap();
     assert_eq!(first_setup.message_id, 1);
+    assert_eq!(first_setup.credit_charge, 1);
     assert_eq!(first_setup.session_id, 0);
     assert_eq!(second_setup.message_id, 2);
+    assert_eq!(second_setup.credit_charge, 1);
     assert_eq!(second_setup.session_id, session_id);
 }
 
