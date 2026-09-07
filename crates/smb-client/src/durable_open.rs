@@ -1,6 +1,6 @@
 use smb_io_wire::{
     DURABLE_HANDLE_REQUEST_V2_NAME, Dialect, DurableHandleReconnectV2, DurableHandleRequestV2,
-    DurableHandleResponseV2, capabilities, durable_handle_flags, share_capabilities,
+    DurableHandleResponseV2, capabilities, durable_handle_flags, oplock_level, share_capabilities,
 };
 
 use crate::{
@@ -27,7 +27,7 @@ impl Default for DurableHandleV2Options {
 
 /// A file open for which the server granted SMB2 Durable Handle V2 state.
 ///
-/// The original CREATE parameters and CreateGuid are retained because SMB2 durable reconnect must
+/// The effective CREATE parameters and CreateGuid are retained because SMB2 durable reconnect must
 /// replay those identity parameters rather than silently degrading into a path-only reopen.
 #[derive(Debug, Clone)]
 pub struct DurableFileHandle {
@@ -83,6 +83,13 @@ where
     ) -> Result<DurableFileHandle, ClientError> {
         ensure_durable_v2_supported(self, tree, durable_options.persistent)?;
 
+        // Until leases are implemented, a non-CA durable open requests a batch oplock so the
+        // server has handle-caching state it can preserve across a transport disconnect.
+        let mut effective_open_options = open_options;
+        if !durable_options.persistent {
+            effective_open_options.requested_oplock_level = oplock_level::BATCH;
+        }
+
         let request = DurableHandleRequestV2 {
             timeout_ms: durable_options.timeout_ms,
             flags: if durable_options.persistent {
@@ -97,7 +104,7 @@ where
             .open_file_with_contexts(
                 tree,
                 path,
-                open_options,
+                effective_open_options,
                 std::slice::from_ref(&request_context),
             )
             .await?;
@@ -114,7 +121,7 @@ where
         Ok(DurableFileHandle {
             file: result.file,
             create_guid,
-            open_options,
+            open_options: effective_open_options,
             server_timeout_ms: response.timeout_ms,
             server_flags: response.flags,
         })
