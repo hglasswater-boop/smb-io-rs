@@ -12,6 +12,7 @@ mod file;
 mod message_id;
 mod negotiate;
 mod preauth;
+mod read;
 mod session;
 mod signing;
 mod transport;
@@ -23,6 +24,7 @@ pub use file::{FileHandle, FileOpenOptions};
 pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
+pub use read::{ReadOptions, STATUS_END_OF_FILE};
 pub use session::{
     STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
 };
