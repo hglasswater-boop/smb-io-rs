@@ -1,9 +1,9 @@
+use crate::FileId;
 use crate::error::{WireError, require_len};
 use crate::header::{
     Command, HeaderId, SMB2_HEADER_SIZE, Smb2Header, flags, get_u16, get_u32, get_u64, put_u16,
     put_u32, put_u64,
 };
-use crate::FileId;
 
 pub const CLOSE_REQUEST_STRUCTURE_SIZE: u16 = 24;
 pub const CLOSE_REQUEST_FIXED_SIZE: usize = 24;
@@ -59,7 +59,8 @@ impl CloseRequest {
         credit_charge: u16,
         credit_request: u16,
     ) -> Result<Vec<u8>, WireError> {
-        let mut header = Smb2Header::request(Command::Close, message_id, credit_charge, credit_request);
+        let mut header =
+            Smb2Header::request(Command::Close, message_id, credit_charge, credit_request);
         header.session_id = session_id;
         header.id = HeaderId::Sync {
             process_id: 0,
@@ -100,7 +101,7 @@ impl CloseRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseResponse {
     pub header: Smb2Header,
     pub flags: u16,
