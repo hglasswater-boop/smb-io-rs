@@ -3,9 +3,7 @@ use smb_io_wire::{
     DurableHandleResponseV2, capabilities, durable_handle_flags, oplock_level, share_capabilities,
 };
 
-use crate::{
-    ClientError, FileHandle, FileOpenOptions, SessionConnection, Transport, TreeHandle,
-};
+use crate::{ClientError, FileHandle, FileOpenOptions, SessionConnection, Transport, TreeHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurableHandleV2Options {
@@ -110,9 +108,7 @@ where
             .await?;
         let response = required_durable_response(&result.response_contexts)?;
 
-        if durable_options.persistent
-            && response.flags & durable_handle_flags::PERSISTENT == 0
-        {
+        if durable_options.persistent && response.flags & durable_handle_flags::PERSISTENT == 0 {
             return Err(ClientError::Protocol(
                 "server did not grant the requested persistent durable handle",
             ));
@@ -194,9 +190,7 @@ where
         "durable handle requires negotiated SMB parameters",
     ))?;
     if negotiated.dialect < Dialect::Smb300 {
-        return Err(ClientError::Protocol(
-            "Durable Handle V2 requires SMB 3.x",
-        ));
+        return Err(ClientError::Protocol("Durable Handle V2 requires SMB 3.x"));
     }
     if persistent {
         if negotiated.capabilities & capabilities::PERSISTENT_HANDLES == 0 {
@@ -285,9 +279,8 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&60_000u32.to_le_bytes());
         data.extend_from_slice(&durable_handle_flags::PERSISTENT.to_le_bytes());
-        let contexts = vec![
-            CreateContext::new(DURABLE_HANDLE_REQUEST_V2_NAME.to_vec(), data).unwrap(),
-        ];
+        let contexts =
+            vec![CreateContext::new(DURABLE_HANDLE_REQUEST_V2_NAME.to_vec(), data).unwrap()];
         let response = required_durable_response(&contexts).unwrap();
         assert_eq!(response.flags, durable_handle_flags::PERSISTENT);
     }
