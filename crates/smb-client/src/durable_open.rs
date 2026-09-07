@@ -3,7 +3,9 @@ use smb_io_wire::{
     DurableHandleResponseV2, capabilities, durable_handle_flags, oplock_level, share_capabilities,
 };
 
-use crate::{ClientError, FileHandle, FileOpenOptions, SessionConnection, Transport, TreeHandle};
+use crate::{
+    ClientError, CloseOptions, FileHandle, FileOpenOptions, SessionConnection, Transport, TreeHandle,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DurableHandleV2Options {
@@ -97,16 +99,25 @@ where
                 std::slice::from_ref(&request_context),
             )
             .await?;
-        let response = required_durable_response(&result.response_contexts)?;
+        let file = result.file;
+        let response = match required_durable_response(&result.response_contexts) {
+            Ok(response) => response,
+            Err(error @ ClientError::Capability(_)) => {
+                self.close_file(file, CloseOptions::default()).await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
 
         if durable_options.persistent && response.flags & durable_handle_flags::PERSISTENT == 0 {
-            return Err(ClientError::Protocol(
+            self.close_file(file, CloseOptions::default()).await?;
+            return Err(ClientError::Capability(
                 "server did not grant the requested persistent durable handle",
             ));
         }
 
         Ok(DurableFileHandle {
-            file: result.file,
+            file,
             create_guid,
             open_options: effective_open_options,
             server_timeout_ms: response.timeout_ms,
@@ -182,16 +193,18 @@ where
         "durable handle requires negotiated SMB parameters",
     ))?;
     if negotiated.dialect < Dialect::Smb300 {
-        return Err(ClientError::Protocol("Durable Handle V2 requires SMB 3.x"));
+        return Err(ClientError::Capability(
+            "Durable Handle V2 requires SMB 3.x",
+        ));
     }
     if persistent {
         if negotiated.capabilities & capabilities::PERSISTENT_HANDLES == 0 {
-            return Err(ClientError::Protocol(
+            return Err(ClientError::Capability(
                 "server did not negotiate persistent-handle capability",
             ));
         }
         if tree.capabilities() & share_capabilities::CONTINUOUS_AVAILABILITY == 0 {
-            return Err(ClientError::Protocol(
+            return Err(ClientError::Capability(
                 "persistent durable handles require a continuously available share",
             ));
         }
@@ -202,7 +215,7 @@ where
 fn required_durable_response(
     contexts: &[smb_io_wire::CreateContext],
 ) -> Result<DurableHandleResponseV2, ClientError> {
-    optional_durable_response(contexts)?.ok_or(ClientError::Protocol(
+    optional_durable_response(contexts)?.ok_or(ClientError::Capability(
         "server did not grant SMB2 Durable Handle V2",
     ))
 }
@@ -251,9 +264,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_dh2q_is_not_silently_accepted() {
+    fn missing_dh2q_is_capability_unavailable_not_protocol_corruption() {
         let contexts = vec![CreateContext::new(b"QFid".to_vec(), Vec::new()).unwrap()];
-        assert!(required_durable_response(&contexts).is_err());
+        assert!(matches!(
+            required_durable_response(&contexts),
+            Err(ClientError::Capability(_))
+        ));
     }
 
     #[test]
