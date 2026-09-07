@@ -102,7 +102,10 @@ impl ReconnectRecipe {
     }
 }
 
-fn validate_file_identity(original: FileIdentity, reopened: FileIdentity) -> Result<(), ClientError> {
+fn validate_file_identity(
+    original: FileIdentity,
+    reopened: FileIdentity,
+) -> Result<(), ClientError> {
     if original.is_compatible_with(reopened) {
         Ok(())
     } else {
