@@ -303,9 +303,9 @@ impl CreateResponse {
                 .map_err(|_| WireError::InvalidField("CREATE CreateContextsOffset"))?;
             let len = usize::try_from(create_contexts_length)
                 .map_err(|_| WireError::InvalidField("CREATE CreateContextsLength"))?;
-            let end = offset
-                .checked_add(len)
-                .ok_or(WireError::InvalidField("CREATE create-context length overflow"))?;
+            let end = offset.checked_add(len).ok_or(WireError::InvalidField(
+                "CREATE create-context length overflow",
+            ))?;
             if offset % 8 != 0 || end > message.len() {
                 return Err(WireError::InvalidOffset {
                     field: "CREATE CreateContexts",

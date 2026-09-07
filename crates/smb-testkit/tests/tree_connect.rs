@@ -116,11 +116,7 @@ fn signed_tree_response(session_id: u64, tree_id: u32, signing: &SigningState) -
     message
 }
 
-fn signed_create_response(
-    session_id: u64,
-    tree_id: u32,
-    signing: &SigningState,
-) -> Vec<u8> {
+fn signed_create_response(session_id: u64, tree_id: u32, signing: &SigningState) -> Vec<u8> {
     let mut header = Smb2Header::request(Command::Create, 3, 0, 16);
     header.flags = flags::SERVER_TO_REDIR;
     header.status = StatusField::Status(0);
