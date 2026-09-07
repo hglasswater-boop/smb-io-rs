@@ -5,6 +5,7 @@
 
 mod engine;
 mod jni;
+mod reconnect;
 
 pub use engine::{
     AndroidBridgeError, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest,
