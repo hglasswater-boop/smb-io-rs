@@ -166,7 +166,7 @@ impl TreeConnectRequest {
             return Err(WireError::InvalidOffset {
                 field: "TREE_CONNECT Path",
                 offset: path_offset,
-                length: path_len,
+                len: path_len,
                 packet_len: message.len(),
             });
         }
