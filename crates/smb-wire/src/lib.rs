@@ -10,6 +10,7 @@ mod cancel;
 mod close;
 mod create;
 mod create_context;
+mod durable;
 mod error;
 mod frame;
 mod header;
@@ -31,6 +32,12 @@ pub use create::{
 };
 pub use create_context::{
     CREATE_CONTEXT_FIXED_SIZE, CreateContext, decode_create_contexts, encode_create_contexts,
+};
+pub use durable::{
+    DURABLE_HANDLE_RECONNECT_V2_DATA_SIZE, DURABLE_HANDLE_RECONNECT_V2_NAME,
+    DURABLE_HANDLE_REQUEST_V2_DATA_SIZE, DURABLE_HANDLE_REQUEST_V2_NAME,
+    DURABLE_HANDLE_RESPONSE_V2_DATA_SIZE, DurableHandleReconnectV2, DurableHandleRequestV2,
+    DurableHandleResponseV2, durable_handle_flags,
 };
 pub use error::WireError;
 pub use frame::{
