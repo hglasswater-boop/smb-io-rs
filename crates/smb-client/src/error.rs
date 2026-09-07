@@ -11,6 +11,12 @@ pub enum ClientError {
     Timeout(&'static str),
     ServerStatus(u32),
     Cancelled,
+    /// A well-formed peer or negotiated dialect does not provide an optional capability.
+    ///
+    /// This is intentionally distinct from `Protocol`: callers may choose a documented fallback
+    /// for an unavailable optional feature, but must never use that fallback to mask malformed or
+    /// security-invalid protocol traffic.
+    Capability(&'static str),
     Protocol(&'static str),
 }
 
@@ -23,6 +29,7 @@ impl fmt::Display for ClientError {
             Self::Timeout(stage) => write!(f, "SMB operation timed out during {stage}"),
             Self::ServerStatus(status) => write!(f, "SMB server returned NTSTATUS 0x{status:08X}"),
             Self::Cancelled => f.write_str("SMB operation was cancelled"),
+            Self::Capability(message) => write!(f, "SMB capability unavailable: {message}"),
             Self::Protocol(message) => write!(f, "SMB protocol error: {message}"),
         }
     }
@@ -34,7 +41,11 @@ impl std::error::Error for ClientError {
             Self::Io(error) => Some(error),
             Self::Wire(error) => Some(error),
             Self::Auth(error) => Some(error),
-            Self::Timeout(_) | Self::ServerStatus(_) | Self::Cancelled | Self::Protocol(_) => None,
+            Self::Timeout(_)
+            | Self::ServerStatus(_)
+            | Self::Cancelled
+            | Self::Capability(_)
+            | Self::Protocol(_) => None,
         }
     }
 }
