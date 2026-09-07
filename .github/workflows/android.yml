@@ -1,0 +1,55 @@
+name: Android JNI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 29.0.14206865
+      CARGO_NDK_PLATFORM: 26
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;${NDK_VERSION}"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Build Android JNI libraries
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          cargo ndk \
+            -t arm64-v8a \
+            -t armeabi-v7a \
+            -t x86_64 \
+            -o dist/jniLibs \
+            build --release -p smb-io-android
+
+      - name: Verify JNI outputs
+        run: |
+          test -f dist/jniLibs/arm64-v8a/libsmb_io_android.so
+          test -f dist/jniLibs/armeabi-v7a/libsmb_io_android.so
+          test -f dist/jniLibs/x86_64/libsmb_io_android.so
+          find dist/jniLibs -type f -name 'libsmb_io_android.so' -print
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smb-io-android-jni
+          path: dist/jniLibs
+          if-no-files-found: error
