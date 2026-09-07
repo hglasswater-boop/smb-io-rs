@@ -292,6 +292,64 @@ jobs:
           grep -q "^reconnect_verified_offset: ${LARGE_OFFSET}$" "$LOG"
           grep -q '^reconnect_verified: true$' "$LOG"
 
+      - name: Reject replacement file during reconnect
+        run: |
+          set -euo pipefail
+          READY=/tmp/identity-reconnect-ready
+          RESUME=/tmp/identity-reconnect-resume
+          LOG=/tmp/identity-reconnect.log
+          rm -f "$READY" "$RESUME" "$LOG"
+
+          cargo run -p smb-io-probe -- \
+            verify-reconnect 127.0.0.1 "$SMB_PORT" guest large.bin - - \
+            0 "$FIRST_MARKER_HEX" \
+            "$LARGE_OFFSET" "$LARGE_MARKER_HEX" \
+            "$READY" "$RESUME" \
+            >"$LOG" 2>&1 &
+          PROBE_PID=$!
+
+          for attempt in $(seq 1 120); do
+            if [ -f "$READY" ]; then
+              break
+            fi
+            if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+              cat "$LOG"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          test -f "$READY" || { cat "$LOG"; exit 1; }
+
+          sudo pkill smbd 2>/dev/null || true
+          for attempt in $(seq 1 40); do
+            if ! pgrep smbd >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          sudo rm -f /run/samba/smbd.pid
+
+          # Keep the path and existing marker bytes, but mutate the logical file identity.
+          sudo truncate -s $((LARGE_OFFSET + 17)) /tmp/xfiles-smb-fixtures/large.bin
+
+          sudo smbd -D -s /tmp/xfiles-smb.conf
+          for attempt in $(seq 1 60); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null
+
+          touch "$RESUME"
+          if wait "$PROBE_PID"; then
+            cat "$LOG"
+            echo 'replacement file was incorrectly accepted after reconnect' >&2
+            exit 1
+          fi
+          cat "$LOG"
+          grep -q 'SMB file changed while reconnecting by path' "$LOG"
+
       - name: Dump Samba logs on failure
         if: failure()
         run: |
@@ -299,3 +357,4 @@ jobs:
           sudo cat /tmp/xfiles-smb-guest.log 2>/dev/null || true
           cat /tmp/auth-reconnect.log 2>/dev/null || true
           cat /tmp/guest-reconnect.log 2>/dev/null || true
+          cat /tmp/identity-reconnect.log 2>/dev/null || true
