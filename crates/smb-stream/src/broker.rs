@@ -1,9 +1,9 @@
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use smb_io_client::{FileHandle, SessionConnection, Transport};
+use smb_io_client::{
+    ClientError, FileHandle, ReadCancellationToken, SessionConnection, Transport,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{StreamError, VideoReader, VideoReaderConfig};
@@ -59,31 +59,6 @@ impl From<StreamError> for BrokerError {
     }
 }
 
-#[derive(Clone, Debug)]
-struct GenerationClock {
-    value: Arc<AtomicU64>,
-}
-
-impl GenerationClock {
-    fn new() -> Self {
-        Self {
-            value: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    fn current(&self) -> u64 {
-        self.value.load(Ordering::Acquire)
-    }
-
-    fn advance(&self) -> u64 {
-        self.value.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
-    }
-
-    fn is_current(&self, generation: u64) -> bool {
-        self.current() == generation
-    }
-}
-
 enum BrokerCommand {
     Read {
         generation: u64,
@@ -101,26 +76,27 @@ enum BrokerCommand {
 
 /// Cheap cloneable control surface used by a player, JNI adapter, or FFmpeg bridge.
 ///
-/// `seek()` updates the generation atomically without waiting for the broker's SMB transport loop.
-/// A prefetch that finishes after that point is treated as stale and its cache is discarded.
+/// `seek()` advances the cancellation generation synchronously. A blocked network READ notices the
+/// change, emits SMB2 CANCEL for its outstanding requests, drains their target responses, and then
+/// returns control to the broker without admitting stale data into the cache.
 #[derive(Clone)]
 pub struct VideoBrokerHandle {
-    generation: GenerationClock,
+    cancellation: ReadCancellationToken,
     commands: mpsc::Sender<BrokerCommand>,
 }
 
 impl VideoBrokerHandle {
     pub fn generation(&self) -> u64 {
-        self.generation.current()
+        self.cancellation.generation()
     }
 
     /// Invalidates all work issued under the previous logical playback position.
     pub fn seek(&self) -> u64 {
-        self.generation.advance()
+        self.cancellation.advance()
     }
 
     pub async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, BrokerError> {
-        let generation = self.generation.current();
+        let generation = self.cancellation.generation();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(BrokerCommand::Read {
@@ -139,7 +115,7 @@ impl VideoBrokerHandle {
     /// Network or decode failures are intentionally not returned to the caller because prefetch is
     /// optional. Interactive `read()` calls still surface their errors normally.
     pub async fn prefetch(&self, offset: u64, length: usize) -> Result<(), BrokerError> {
-        let generation = self.generation.current();
+        let generation = self.cancellation.generation();
         self.commands
             .send(BrokerCommand::Prefetch {
                 generation,
@@ -164,7 +140,7 @@ impl VideoBrokerHandle {
 /// `tokio::spawn`. This keeps the crate compatible with runtimes that want to place SMB I/O on a
 /// dedicated task or LocalSet, while Android can simply run it on its native Tokio runtime.
 pub struct VideoBrokerRunner<T> {
-    generation: GenerationClock,
+    cancellation: ReadCancellationToken,
     commands: mpsc::Receiver<BrokerCommand>,
     session: SessionConnection<T>,
     file: FileHandle,
@@ -201,7 +177,7 @@ where
     }
 
     fn prepare_generation(&mut self, generation: u64, offset: u64) -> Result<(), BrokerError> {
-        if !self.generation.is_current(generation) {
+        if !self.cancellation.is_current(generation) {
             return Err(BrokerError::StaleGeneration);
         }
         if generation != self.active_generation {
@@ -220,15 +196,24 @@ where
         self.prepare_generation(generation, offset)?;
         let result = self
             .reader
-            .read(&mut self.session, &self.file, offset, length)
-            .await
-            .map_err(BrokerError::Stream)?;
+            .read_cancelable(
+                &mut self.session,
+                &self.file,
+                offset,
+                length,
+                &self.cancellation,
+                generation,
+            )
+            .await;
 
-        if !self.generation.is_current(generation) {
-            self.reader.invalidate();
-            return Err(BrokerError::StaleGeneration);
+        match result {
+            Ok(data) if self.cancellation.is_current(generation) => Ok(data),
+            Ok(_) | Err(StreamError::Client(ClientError::Cancelled)) => {
+                self.reader.invalidate();
+                Err(BrokerError::StaleGeneration)
+            }
+            Err(error) => Err(BrokerError::Stream(error)),
         }
-        Ok(result)
     }
 
     async fn process_prefetch(
@@ -240,14 +225,24 @@ where
         self.prepare_generation(generation, offset)?;
         let result = self
             .reader
-            .read(&mut self.session, &self.file, offset, length)
+            .read_cancelable(
+                &mut self.session,
+                &self.file,
+                offset,
+                length,
+                &self.cancellation,
+                generation,
+            )
             .await;
 
-        if !self.generation.is_current(generation) {
-            self.reader.invalidate();
-            return Err(BrokerError::StaleGeneration);
+        match result {
+            Ok(_) if self.cancellation.is_current(generation) => Ok(()),
+            Ok(_) | Err(StreamError::Client(ClientError::Cancelled)) => {
+                self.reader.invalidate();
+                Err(BrokerError::StaleGeneration)
+            }
+            Err(error) => Err(BrokerError::Stream(error)),
         }
-        result.map(|_| ()).map_err(BrokerError::Stream)
     }
 }
 
@@ -265,14 +260,14 @@ where
         ));
     }
     let reader = VideoReader::new(config.reader)?;
-    let generation = GenerationClock::new();
+    let cancellation = ReadCancellationToken::new();
     let (commands_tx, commands_rx) = mpsc::channel(config.queue_capacity);
     let handle = VideoBrokerHandle {
-        generation: generation.clone(),
+        cancellation: cancellation.clone(),
         commands: commands_tx,
     };
     let runner = VideoBrokerRunner {
-        generation,
+        cancellation,
         commands: commands_rx,
         session,
         file,
@@ -287,14 +282,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generation_clock_invalidates_old_work_immediately() {
-        let clock = GenerationClock::new();
-        let initial = clock.current();
-        assert!(clock.is_current(initial));
-        let next = clock.advance();
+    fn seek_token_invalidates_old_work_immediately() {
+        let token = ReadCancellationToken::new();
+        let initial = token.generation();
+        assert!(token.is_current(initial));
+        let next = token.advance();
         assert_eq!(next, initial + 1);
-        assert!(!clock.is_current(initial));
-        assert!(clock.is_current(next));
+        assert!(!token.is_current(initial));
+        assert!(token.is_current(next));
     }
 
     #[test]
