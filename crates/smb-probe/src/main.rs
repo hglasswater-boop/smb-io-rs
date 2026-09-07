@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
 use std::error::Error;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use smb_io_android::{AndroidEngine, AndroidEngineConfig, VideoOpenRequest};
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
     CloseOptions, Connection, Dialect, FileOpenOptions, NegotiateConfig, SessionConnection,
@@ -34,6 +37,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ensure_no_more_with(args, verify_usage())?;
             run_verify(request).await
         }
+        "verify-reconnect" => {
+            let request = ReconnectVerifyRequest {
+                host: args.next().ok_or_else(reconnect_usage)?,
+                port: args
+                    .next()
+                    .ok_or_else(reconnect_usage)?
+                    .parse::<u16>()?,
+                share: args.next().ok_or_else(reconnect_usage)?,
+                path: args.next().ok_or_else(reconnect_usage)?,
+                username: dash_to_empty(args.next().ok_or_else(reconnect_usage)?),
+                password: dash_to_empty(args.next().ok_or_else(reconnect_usage)?),
+                first_offset: args
+                    .next()
+                    .ok_or_else(reconnect_usage)?
+                    .parse::<u64>()?,
+                first_expected: parse_hex(&args.next().ok_or_else(reconnect_usage)?)?,
+                second_offset: args
+                    .next()
+                    .ok_or_else(reconnect_usage)?
+                    .parse::<u64>()?,
+                second_expected: parse_hex(&args.next().ok_or_else(reconnect_usage)?)?,
+                ready_file: PathBuf::from(args.next().ok_or_else(reconnect_usage)?),
+                resume_file: PathBuf::from(args.next().ok_or_else(reconnect_usage)?),
+            };
+            ensure_no_more_with(args, reconnect_usage())?;
+            run_reconnect_verify_on_plain_thread(request)
+        }
         host => {
             // Preserve the original CLI for quick manual NEGOTIATE checks.
             let port = parse_port(args.next())?;
@@ -52,6 +82,21 @@ struct VerifyRequest {
     password: String,
     offset: u64,
     expected: Vec<u8>,
+}
+
+struct ReconnectVerifyRequest {
+    host: String,
+    port: u16,
+    share: String,
+    path: String,
+    username: String,
+    password: String,
+    first_offset: u64,
+    first_expected: Vec<u8>,
+    second_offset: u64,
+    second_expected: Vec<u8>,
+    ready_file: PathBuf,
+    resume_file: PathBuf,
 }
 
 async fn run_negotiate(host: &str, port: u16) -> Result<(), Box<dyn Error>> {
@@ -162,6 +207,94 @@ async fn run_verify(request: VerifyRequest) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn run_reconnect_verify_on_plain_thread(
+    request: ReconnectVerifyRequest,
+) -> Result<(), Box<dyn Error>> {
+    // AndroidEngine owns a Tokio Runtime and synchronously calls block_on. Run it outside the
+    // probe's #[tokio::main] runtime so nested-runtime protection cannot interfere with the test.
+    let task = std::thread::spawn(move || {
+        run_reconnect_verify(request).map_err(|error| error.to_string())
+    });
+    match task.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.into()),
+        Err(_) => Err("reconnect verifier thread panicked".into()),
+    }
+}
+
+fn run_reconnect_verify(request: ReconnectVerifyRequest) -> Result<(), Box<dyn Error>> {
+    if request.first_expected.is_empty() || request.second_expected.is_empty() {
+        return Err("reconnect expected payloads must not be empty".into());
+    }
+
+    let engine = AndroidEngine::new(AndroidEngineConfig {
+        read_reconnect_attempts: 6,
+        reconnect_backoff: Duration::from_millis(250),
+        ..AndroidEngineConfig::default()
+    })?;
+    let mut open = VideoOpenRequest::new(
+        request.host,
+        request.share,
+        request.path,
+        request.username,
+        request.password,
+    );
+    open.port = request.port;
+    let handle = engine.open_video(open)?;
+
+    verify_engine_read(
+        &engine,
+        handle,
+        request.first_offset,
+        &request.first_expected,
+    )?;
+    std::fs::write(&request.ready_file, b"ready\n")?;
+    println!("reconnect_ready: true");
+    wait_for_file(&request.resume_file, Duration::from_secs(30))?;
+
+    engine.seek(handle)?;
+    verify_engine_read(
+        &engine,
+        handle,
+        request.second_offset,
+        &request.second_expected,
+    )?;
+    engine.close_video(handle)?;
+
+    println!("reconnect_verified_offset: {}", request.second_offset);
+    println!("reconnect_verified: true");
+    Ok(())
+}
+
+fn verify_engine_read(
+    engine: &AndroidEngine,
+    handle: smb_io_android::VideoHandle,
+    offset: u64,
+    expected: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let actual = engine.read_at(handle, offset, expected.len())?;
+    if actual != expected {
+        return Err(format!(
+            "Android engine read mismatch at offset {offset:#x}: expected {}, got {}",
+            hex(expected),
+            hex(&actual)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn wait_for_file(path: &Path, timeout: Duration) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!("timed out waiting for reconnect barrier {}", path.display()).into())
+}
+
 async fn negotiated_connection(
     host: &str,
     port: u16,
@@ -207,11 +340,7 @@ fn parse_port(value: Option<String>) -> Result<u16, Box<dyn Error>> {
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" {
-        String::new()
-    } else {
-        value
-    }
+    if value == "-" { String::new() } else { value }
 }
 
 fn ensure_no_more(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
@@ -280,12 +409,17 @@ fn format_guid(guid: [u8; 16]) -> String {
 }
 
 fn usage() -> String {
-    "usage: smb-io-probe [negotiate] <host> [port]\n       smb-io-probe verify <host> <port> <share> <path> <username|-> <password|-> <offset> <expected-hex>"
+    "usage: smb-io-probe [negotiate] <host> [port]\n       smb-io-probe verify <host> <port> <share> <path> <username|-> <password|-> <offset> <expected-hex>\n       smb-io-probe verify-reconnect <host> <port> <share> <path> <username|-> <password|-> <first-offset> <first-hex> <second-offset> <second-hex> <ready-file> <resume-file>"
         .to_string()
 }
 
 fn verify_usage() -> String {
     "usage: smb-io-probe verify <host> <port> <share> <path> <username|-> <password|-> <offset> <expected-hex>"
+        .to_string()
+}
+
+fn reconnect_usage() -> String {
+    "usage: smb-io-probe verify-reconnect <host> <port> <share> <path> <username|-> <password|-> <first-offset> <first-hex> <second-offset> <second-hex> <ready-file> <resume-file>"
         .to_string()
 }
 
