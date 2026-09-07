@@ -135,11 +135,13 @@ impl VideoBrokerHandle {
     }
 }
 
+struct DirectBrokerSource<T> {
+    session: SessionConnection<T>,
+    file: FileHandle,
+}
+
 enum BrokerSource<T> {
-    Direct {
-        session: SessionConnection<T>,
-        file: FileHandle,
-    },
+    Direct(Box<DirectBrokerSource<T>>),
     Recovering(Box<RecoveringReadOnlyFile>),
 }
 
@@ -202,11 +204,12 @@ where
         length: usize,
     ) -> Result<Vec<u8>, StreamError> {
         match &mut self.source {
-            BrokerSource::Direct { session, file } => {
+            BrokerSource::Direct(source) => {
+                let source = source.as_mut();
                 self.reader
                     .read_cancelable(
-                        session,
-                        file,
+                        &mut source.session,
+                        &source.file,
                         offset,
                         length,
                         &self.cancellation,
@@ -287,7 +290,7 @@ where
     validate_queue_capacity(config.queue_capacity)?;
     let reader = VideoReader::new(config.reader)?;
     Ok(broker_from_source(
-        BrokerSource::Direct { session, file },
+        BrokerSource::Direct(Box::new(DirectBrokerSource { session, file })),
         reader,
         config.queue_capacity,
     ))
