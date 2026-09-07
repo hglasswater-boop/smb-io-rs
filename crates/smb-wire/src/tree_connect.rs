@@ -75,9 +75,12 @@ impl TreeConnectRequest {
                 "TREE_CONNECT path must not contain NUL",
             ));
         }
-        let path_len = self.path.encode_utf16().count().checked_mul(2).ok_or(
-            WireError::InvalidField("TREE_CONNECT PathLength overflow"),
-        )?;
+        let path_len = self
+            .path
+            .encode_utf16()
+            .count()
+            .checked_mul(2)
+            .ok_or(WireError::InvalidField("TREE_CONNECT PathLength overflow"))?;
         if path_len == 0 || path_len > u16::MAX as usize {
             return Err(WireError::InvalidField("TREE_CONNECT PathLength"));
         }
@@ -194,10 +197,7 @@ pub struct TreeConnectResponse {
 
 impl TreeConnectResponse {
     pub fn decode_message(message: &[u8]) -> Result<Self, WireError> {
-        require_len(
-            message,
-            SMB2_HEADER_SIZE + TREE_CONNECT_RESPONSE_FIXED_SIZE,
-        )?;
+        require_len(message, SMB2_HEADER_SIZE + TREE_CONNECT_RESPONSE_FIXED_SIZE)?;
         let header = Smb2Header::decode(message)?;
         if header.command != Command::TreeConnect {
             return Err(WireError::InvalidField("TREE_CONNECT response Command"));
@@ -258,7 +258,10 @@ mod tests {
         let body = request.encode_body().unwrap();
         assert_eq!(get_u16(&body, 0), 9);
         assert_eq!(get_u16(&body, 4), 72);
-        assert_eq!(usize::from(get_u16(&body, 6)), "\\\\nas\\video".encode_utf16().count() * 2);
+        assert_eq!(
+            usize::from(get_u16(&body, 6)),
+            "\\\\nas\\video".encode_utf16().count() * 2
+        );
         assert_eq!(
             TreeConnectRequest::decode_message(&request.encode_message(3, 7, 1).unwrap()).unwrap(),
             request

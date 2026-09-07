@@ -70,9 +70,13 @@ where
         options: TreeConnectOptions,
     ) -> Result<TreeHandle, ClientError> {
         let path = path.into();
-        let negotiated = self.connection.negotiated.as_ref().ok_or(ClientError::Protocol(
-            "TREE_CONNECT requires negotiated parameters",
-        ))?;
+        let negotiated = self
+            .connection
+            .negotiated
+            .as_ref()
+            .ok_or(ClientError::Protocol(
+                "TREE_CONNECT requires negotiated parameters",
+            ))?;
         if negotiated.dialect != Dialect::Smb311 && options.flags != 0 {
             return Err(ClientError::Protocol(
                 "TREE_CONNECT flags are only valid for SMB 3.1.1",
@@ -94,11 +98,8 @@ where
             path: path.clone(),
         };
         let message_id = self.connection.message_ids.allocate(0)?;
-        let mut request_message = request.encode_message(
-            message_id,
-            self.session_id,
-            options.credit_request,
-        )?;
+        let mut request_message =
+            request.encode_message(message_id, self.session_id, options.credit_request)?;
 
         let smb311_tree_signing = negotiated.dialect == Dialect::Smb311
             && self.mechanism != smb_io_auth::AuthMechanism::Anonymous
@@ -111,7 +112,10 @@ where
             signing.sign(&mut request_message)?;
         }
 
-        self.connection.transport.send_message(&request_message).await?;
+        self.connection
+            .transport
+            .send_message(&request_message)
+            .await?;
         let mut response_message = self.connection.transport.receive_message().await?;
         let header = Smb2Header::decode(&response_message)?;
         if header.command != Command::TreeConnect {
