@@ -86,12 +86,16 @@ impl fmt::Display for AndroidBridgeError {
             Self::Client(error) => write!(f, "SMB client error: {error}"),
             Self::Stream(error) => write!(f, "SMB stream error: {error}"),
             Self::InvalidHandle(handle) => write!(f, "invalid SMB video handle {}", handle.raw()),
-            Self::InvalidConfig(message) => write!(f, "invalid Android SMB configuration: {message}"),
+            Self::InvalidConfig(message) => {
+                write!(f, "invalid Android SMB configuration: {message}")
+            }
             Self::ReadTooLarge { requested, maximum } => write!(
                 f,
                 "Android SMB read request is too large: requested {requested} bytes, maximum {maximum}"
             ),
-            Self::InternalState(message) => write!(f, "Android SMB internal state error: {message}"),
+            Self::InternalState(message) => {
+                write!(f, "Android SMB internal state error: {message}")
+            }
             Self::RandomSource => f.write_str("failed to obtain secure random bytes"),
         }
     }
@@ -255,7 +259,8 @@ impl AndroidEngine {
         let unc_share = format!("\\\\{host}\\{share}");
 
         let (session, file) = self.runtime.block_on(async move {
-            let transport = TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
+            let transport =
+                TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
             let mut connection = Connection::new(transport);
             connection
                 .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
@@ -349,10 +354,9 @@ impl AndroidEngine {
         let video = self.videos.remove(handle)?;
         video.cancellation.advance();
         let mut state = lock(&video.state)?;
-        let file = state
-            .file
-            .take()
-            .ok_or(AndroidBridgeError::InternalState("video handle is already closed"))?;
+        let file = state.file.take().ok_or(AndroidBridgeError::InternalState(
+            "video handle is already closed",
+        ))?;
         self.runtime
             .block_on(state.session.close_file(file, CloseOptions::default()))
             .map_err(AndroidBridgeError::Client)
@@ -376,9 +380,7 @@ fn validate_open_request(request: &VideoOpenRequest) -> Result<(), AndroidBridge
         ));
     }
     if request.path.is_empty() {
-        return Err(AndroidBridgeError::InvalidConfig(
-            "path must not be empty",
-        ));
+        return Err(AndroidBridgeError::InvalidConfig("path must not be empty"));
     }
     if request.username.is_empty() {
         return Err(AndroidBridgeError::InvalidConfig(
@@ -417,16 +419,20 @@ mod tests {
 
     #[test]
     fn invalid_engine_limits_are_rejected() {
-        assert!(AndroidEngine::new(AndroidEngineConfig {
-            runtime_worker_threads: 0,
-            ..AndroidEngineConfig::default()
-        })
-        .is_err());
-        assert!(AndroidEngine::new(AndroidEngineConfig {
-            max_read_bytes: 0,
-            ..AndroidEngineConfig::default()
-        })
-        .is_err());
+        assert!(
+            AndroidEngine::new(AndroidEngineConfig {
+                runtime_worker_threads: 0,
+                ..AndroidEngineConfig::default()
+            })
+            .is_err()
+        );
+        assert!(
+            AndroidEngine::new(AndroidEngineConfig {
+                max_read_bytes: 0,
+                ..AndroidEngineConfig::default()
+            })
+            .is_err()
+        );
     }
 
     #[test]
