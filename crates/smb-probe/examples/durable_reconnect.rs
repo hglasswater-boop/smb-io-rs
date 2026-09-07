@@ -28,8 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     getrandom::fill(&mut client_guid)?;
     getrandom::fill(&mut create_guid)?;
 
-    let mut first_session =
-        connect_session(&host, port, client_guid, &username, &password).await?;
+    let mut first_session = connect_session(&host, port, client_guid, &username, &password).await?;
     let unc = format!("\\\\{host}\\{share}");
     let first_tree = first_session
         .tree_connect(&unc, TreeConnectOptions::default())
@@ -83,7 +82,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // A clean close after successful recovery proves the reconnected FileId is usable for normal
     // SMB operations, not only for the reconnect CREATE itself.
     second_session
-        .close_file(reconnected.into_file(), smb_io_client::CloseOptions::default())
+        .close_file(
+            reconnected.into_file(),
+            smb_io_client::CloseOptions::default(),
+        )
         .await?;
     Ok(())
 }
