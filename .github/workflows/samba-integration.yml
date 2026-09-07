@@ -23,6 +23,8 @@ jobs:
       SMB_USER: smbtest
       SMB_PASSWORD: 'XFiles-Rust-SMB-42!'
       LARGE_OFFSET: '4294979641'
+      FIRST_MARKER_HEX: '5846494c45535f5245434f4e4e4543545f5354415254'
+      LARGE_MARKER_HEX: '5846494c45535f34475f4d41524b4552'
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +47,12 @@ jobs:
           sudo mkdir -p /tmp/xfiles-smb-fixtures
           printf 'XFILES_RUST_SMB_OK' | sudo tee /tmp/xfiles-smb-fixtures/small.bin >/dev/null
           sudo truncate -s $((LARGE_OFFSET + 16)) /tmp/xfiles-smb-fixtures/large.bin
+          printf 'XFILES_RECONNECT_START' | sudo dd \
+            of=/tmp/xfiles-smb-fixtures/large.bin \
+            bs=1 \
+            seek=0 \
+            conv=notrunc \
+            status=none
           printf 'XFILES_4G_MARKER' | sudo dd \
             of=/tmp/xfiles-smb-fixtures/large.bin \
             bs=1 \
@@ -106,10 +114,65 @@ jobs:
           cargo run -p smb-io-probe -- \
             verify 127.0.0.1 "$SMB_PORT" auth large.bin \
             "$SMB_USER" "$SMB_PASSWORD" "$LARGE_OFFSET" \
-            5846494c45535f34475f4d41524b4552 \
+            "$LARGE_MARKER_HEX" \
             | tee /tmp/auth-large.log
           grep -q "^verified_offset: ${LARGE_OFFSET}$" /tmp/auth-large.log
           grep -q '^verified: true$' /tmp/auth-large.log
+
+      - name: Verify signed reconnect after server restart
+        run: |
+          set -euo pipefail
+          READY=/tmp/auth-reconnect-ready
+          RESUME=/tmp/auth-reconnect-resume
+          LOG=/tmp/auth-reconnect.log
+          rm -f "$READY" "$RESUME" "$LOG"
+
+          cargo run -p smb-io-probe -- \
+            verify-reconnect 127.0.0.1 "$SMB_PORT" auth large.bin \
+            "$SMB_USER" "$SMB_PASSWORD" \
+            0 "$FIRST_MARKER_HEX" \
+            "$LARGE_OFFSET" "$LARGE_MARKER_HEX" \
+            "$READY" "$RESUME" \
+            >"$LOG" 2>&1 &
+          PROBE_PID=$!
+
+          for attempt in $(seq 1 120); do
+            if [ -f "$READY" ]; then
+              break
+            fi
+            if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+              cat "$LOG"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          test -f "$READY" || { cat "$LOG"; exit 1; }
+
+          sudo pkill smbd 2>/dev/null || true
+          for attempt in $(seq 1 40); do
+            if ! pgrep smbd >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          sudo rm -f /run/samba/smbd.pid
+          sudo smbd -D -s /tmp/xfiles-smb.conf
+          for attempt in $(seq 1 60); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null
+
+          touch "$RESUME"
+          if ! wait "$PROBE_PID"; then
+            cat "$LOG"
+            exit 1
+          fi
+          cat "$LOG"
+          grep -q "^reconnect_verified_offset: ${LARGE_OFFSET}$" "$LOG"
+          grep -q '^reconnect_verified: true$' "$LOG"
 
       - name: Restart Samba for anonymous guest access
         run: |
@@ -170,13 +233,69 @@ jobs:
           set -o pipefail
           cargo run -p smb-io-probe -- \
             verify 127.0.0.1 "$SMB_PORT" guest large.bin - - "$LARGE_OFFSET" \
-            5846494c45535f34475f4d41524b4552 \
+            "$LARGE_MARKER_HEX" \
             | tee /tmp/guest-large.log
           grep -q "^verified_offset: ${LARGE_OFFSET}$" /tmp/guest-large.log
           grep -q '^verified: true$' /tmp/guest-large.log
+
+      - name: Verify anonymous reconnect after server restart
+        run: |
+          set -euo pipefail
+          READY=/tmp/guest-reconnect-ready
+          RESUME=/tmp/guest-reconnect-resume
+          LOG=/tmp/guest-reconnect.log
+          rm -f "$READY" "$RESUME" "$LOG"
+
+          cargo run -p smb-io-probe -- \
+            verify-reconnect 127.0.0.1 "$SMB_PORT" guest large.bin - - \
+            0 "$FIRST_MARKER_HEX" \
+            "$LARGE_OFFSET" "$LARGE_MARKER_HEX" \
+            "$READY" "$RESUME" \
+            >"$LOG" 2>&1 &
+          PROBE_PID=$!
+
+          for attempt in $(seq 1 120); do
+            if [ -f "$READY" ]; then
+              break
+            fi
+            if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+              cat "$LOG"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          test -f "$READY" || { cat "$LOG"; exit 1; }
+
+          sudo pkill smbd 2>/dev/null || true
+          for attempt in $(seq 1 40); do
+            if ! pgrep smbd >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          sudo rm -f /run/samba/smbd.pid
+          sudo smbd -D -s /tmp/xfiles-smb.conf
+          for attempt in $(seq 1 60); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null
+
+          touch "$RESUME"
+          if ! wait "$PROBE_PID"; then
+            cat "$LOG"
+            exit 1
+          fi
+          cat "$LOG"
+          grep -q "^reconnect_verified_offset: ${LARGE_OFFSET}$" "$LOG"
+          grep -q '^reconnect_verified: true$' "$LOG"
 
       - name: Dump Samba logs on failure
         if: failure()
         run: |
           sudo cat /tmp/xfiles-smb-signed.log 2>/dev/null || true
           sudo cat /tmp/xfiles-smb-guest.log 2>/dev/null || true
+          cat /tmp/auth-reconnect.log 2>/dev/null || true
+          cat /tmp/guest-reconnect.log 2>/dev/null || true
