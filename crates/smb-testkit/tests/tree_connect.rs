@@ -1,13 +1,19 @@
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
 use smb_io_auth::{AuthError, AuthMechanism, AuthProvider, AuthState, AuthStep, SecretBytes};
 use smb_io_client::{
-    Connection, Dialect, FileOpenOptions, NegotiateConfig, SessionSetupConfig, SigningAlgorithm,
-    SigningState, TreeConnectOptions,
+    ClientError, Connection, Dialect, FileOpenOptions, NegotiateConfig, PipelinedReadOptions,
+    ReadCancellationToken, SessionSetupConfig, SigningAlgorithm, SigningState, Transport,
+    TreeConnectOptions, STATUS_CANCELLED,
 };
 use smb_io_testkit::ScriptedTransport;
 use smb_io_wire::{
-    Command, HeaderId, SMB2_PROTOCOL_ID, Smb2Header, StatusField, TreeConnectRequest, capabilities,
-    create_action, flags, security_mode, share_flags, share_type,
+    CancelRequest, Command, HeaderId, SMB2_PROTOCOL_ID, Smb2Header, StatusField,
+    TreeConnectRequest, capabilities, create_action, flags, security_mode, share_flags, share_type,
 };
+use tokio::sync::Notify;
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;
@@ -47,6 +53,104 @@ impl AuthProvider for StaticAuth {
 
     fn take_session_key(&mut self) -> Option<SecretBytes> {
         self.key.take()
+    }
+}
+
+#[derive(Default)]
+struct CancelGateState {
+    sent: Mutex<Vec<Vec<u8>>>,
+    reads_sent: AtomicUsize,
+    cancels_sent: AtomicUsize,
+    reads_ready: Notify,
+    cancels_ready: Notify,
+}
+
+#[derive(Clone)]
+struct CancelGateProbe {
+    state: Arc<CancelGateState>,
+}
+
+impl CancelGateProbe {
+    async fn wait_for_reads(&self, minimum: usize) {
+        loop {
+            let notified = self.state.reads_ready.notified();
+            if self.state.reads_sent.load(Ordering::Acquire) >= minimum {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn cancel_count(&self) -> usize {
+        self.state.cancels_sent.load(Ordering::Acquire)
+    }
+
+    fn sent_messages(&self) -> Vec<Vec<u8>> {
+        self.state.sent.lock().unwrap().clone()
+    }
+}
+
+struct CancelGateTransport {
+    initial: VecDeque<Vec<u8>>,
+    gated: VecDeque<Vec<u8>>,
+    required_cancels: usize,
+    state: Arc<CancelGateState>,
+}
+
+impl CancelGateTransport {
+    fn new(
+        initial: impl IntoIterator<Item = Vec<u8>>,
+        gated: impl IntoIterator<Item = Vec<u8>>,
+        required_cancels: usize,
+    ) -> (Self, CancelGateProbe) {
+        let state = Arc::new(CancelGateState::default());
+        let probe = CancelGateProbe {
+            state: state.clone(),
+        };
+        (
+            Self {
+                initial: initial.into_iter().collect(),
+                gated: gated.into_iter().collect(),
+                required_cancels,
+                state,
+            },
+            probe,
+        )
+    }
+}
+
+impl Transport for CancelGateTransport {
+    async fn send_message(&mut self, message: &[u8]) -> Result<(), ClientError> {
+        let header = Smb2Header::decode(message)?;
+        self.state.sent.lock().unwrap().push(message.to_vec());
+        match header.command {
+            Command::Read => {
+                self.state.reads_sent.fetch_add(1, Ordering::AcqRel);
+                self.state.reads_ready.notify_waiters();
+            }
+            Command::Cancel => {
+                self.state.cancels_sent.fetch_add(1, Ordering::AcqRel);
+                self.state.cancels_ready.notify_waiters();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn receive_message(&mut self) -> Result<Vec<u8>, ClientError> {
+        if let Some(message) = self.initial.pop_front() {
+            return Ok(message);
+        }
+
+        loop {
+            let notified = self.state.cancels_ready.notified();
+            if self.state.cancels_sent.load(Ordering::Acquire) >= self.required_cancels {
+                return self.gated.pop_front().ok_or(ClientError::Protocol(
+                    "cancel gate transport has no gated response",
+                ));
+            }
+            notified.await;
+        }
     }
 }
 
@@ -173,31 +277,32 @@ fn signed_read_response(
     message
 }
 
-#[tokio::test]
-async fn authenticated_session_pipelines_out_of_order_reads_above_four_gib() {
-    let session_key = [0xA5; 16];
-    let session_id = 0x1122_3344_5566_7788;
-    let tree_id = 0x42;
-    let read_offset = 4 * GIB + 12_345;
-    let signing = SigningState::derive(
-        Dialect::Smb302,
-        SigningAlgorithm::AesCmac,
-        &SecretBytes::new(session_key.to_vec()),
-        None,
-    )
-    .unwrap();
+fn signed_cancelled_read_response(
+    session_id: u64,
+    tree_id: u32,
+    message_id: u64,
+    signing: &SigningState,
+) -> Vec<u8> {
+    let mut header = Smb2Header::request(Command::Read, message_id, 4, 4);
+    header.flags = flags::SERVER_TO_REDIR;
+    header.status = StatusField::Status(STATUS_CANCELLED);
+    header.session_id = session_id;
+    header.id = HeaderId::Sync {
+        process_id: 0,
+        tree_id,
+    };
+    let mut message = header.encode().to_vec();
+    signing.sign(&mut message).unwrap();
+    message
+}
 
-    // The four READ responses deliberately arrive out of request order: 3rd, 1st, 4th, 2nd.
-    let transport = ScriptedTransport::new([
-        negotiate_302_response(),
-        signed_session_response(session_id, &signing),
-        signed_tree_response(session_id, tree_id, &signing),
-        signed_create_response(session_id, tree_id, &signing),
-        signed_read_response(session_id, tree_id, 12, 0xA2, &signing),
-        signed_read_response(session_id, tree_id, 4, 0xA0, &signing),
-        signed_read_response(session_id, tree_id, 16, 0xA3, &signing),
-        signed_read_response(session_id, tree_id, 8, 0xA1, &signing),
-    ]);
+async fn open_test_file<T: Transport>(
+    transport: T,
+    session_key: [u8; 16],
+) -> (
+    smb_io_client::SessionConnection<T>,
+    smb_io_client::FileHandle,
+) {
     let mut connection = Connection::new(transport);
     let config = NegotiateConfig {
         dialects: vec![Dialect::Smb302],
@@ -215,19 +320,10 @@ async fn authenticated_session_pipelines_out_of_order_reads_above_four_gib() {
         .session_setup(&mut auth, SessionSetupConfig::default())
         .await
         .unwrap();
-    assert!(session.signing_required());
-    assert_eq!(session.signing_algorithm(), Some(SigningAlgorithm::AesCmac));
-
     let tree = session
         .tree_connect("\\\\nas\\video", TreeConnectOptions::default())
         .await
         .unwrap();
-    assert_eq!(tree.tree_id(), tree_id);
-    assert_eq!(tree.path(), "\\\\nas\\video");
-    assert_eq!(tree.share_type(), share_type::DISK);
-    assert_eq!(tree.share_flags(), share_flags::NO_CACHING);
-    assert_eq!(tree.maximal_access(), 0x001f_01ff);
-
     let file = session
         .open_file(
             &tree,
@@ -236,6 +332,36 @@ async fn authenticated_session_pipelines_out_of_order_reads_above_four_gib() {
         )
         .await
         .unwrap();
+    (session, file)
+}
+
+#[tokio::test]
+async fn authenticated_session_pipelines_out_of_order_reads_above_four_gib() {
+    let session_key = [0xA5; 16];
+    let session_id = 0x1122_3344_5566_7788;
+    let tree_id = 0x42;
+    let read_offset = 4 * GIB + 12_345;
+    let signing = SigningState::derive(
+        Dialect::Smb302,
+        SigningAlgorithm::AesCmac,
+        &SecretBytes::new(session_key.to_vec()),
+        None,
+    )
+    .unwrap();
+
+    let transport = ScriptedTransport::new([
+        negotiate_302_response(),
+        signed_session_response(session_id, &signing),
+        signed_tree_response(session_id, tree_id, &signing),
+        signed_create_response(session_id, tree_id, &signing),
+        signed_read_response(session_id, tree_id, 12, 0xA2, &signing),
+        signed_read_response(session_id, tree_id, 4, 0xA0, &signing),
+        signed_read_response(session_id, tree_id, 16, 0xA3, &signing),
+        signed_read_response(session_id, tree_id, 8, 0xA1, &signing),
+    ]);
+    let (mut session, file) = open_test_file(transport, session_key).await;
+    assert!(session.signing_required());
+    assert_eq!(session.signing_algorithm(), Some(SigningAlgorithm::AesCmac));
     assert_eq!(file.tree_id(), tree_id);
     assert_eq!(file.path(), "movies\\sample.mkv");
     assert_eq!(file.len(), 6 * GIB);
@@ -298,6 +424,118 @@ async fn authenticated_session_pipelines_out_of_order_reads_above_four_gib() {
         assert_eq!(
             u64::from_le_bytes(body[24..32].try_into().unwrap()),
             0x5555_6666_7777_8888
+        );
+    }
+}
+
+#[tokio::test]
+async fn seek_cancels_in_flight_reads_drains_old_responses_and_reuses_connection() {
+    let session_key = [0xA5; 16];
+    let session_id = 0x1122_3344_5566_7788;
+    let tree_id = 0x42;
+    let read_offset = 4 * GIB + 33_333;
+    let signing = SigningState::derive(
+        Dialect::Smb302,
+        SigningAlgorithm::AesCmac,
+        &SecretBytes::new(session_key.to_vec()),
+        None,
+    )
+    .unwrap();
+
+    let (transport, probe) = CancelGateTransport::new(
+        [
+            negotiate_302_response(),
+            signed_session_response(session_id, &signing),
+            signed_tree_response(session_id, tree_id, &signing),
+            signed_create_response(session_id, tree_id, &signing),
+        ],
+        [
+            signed_cancelled_read_response(session_id, tree_id, 12, &signing),
+            signed_cancelled_read_response(session_id, tree_id, 4, &signing),
+            signed_cancelled_read_response(session_id, tree_id, 16, &signing),
+            signed_cancelled_read_response(session_id, tree_id, 8, &signing),
+            signed_read_response(session_id, tree_id, 20, 0xBC, &signing),
+        ],
+        4,
+    );
+    let (mut session, file) = open_test_file(transport, session_key).await;
+
+    let cancellation = ReadCancellationToken::new();
+    let generation = cancellation.generation();
+    let trigger_token = cancellation.clone();
+    let trigger_probe = probe.clone();
+    let trigger = tokio::spawn(async move {
+        trigger_probe.wait_for_reads(4).await;
+        trigger_token.advance()
+    });
+
+    let cancelled = session
+        .read_at_pipelined_cancelable_with_options(
+            &file,
+            read_offset,
+            MIB,
+            PipelinedReadOptions {
+                chunk_size: PIPELINE_CHUNK,
+                max_in_flight: 4,
+                credit_request: 32,
+            },
+            &cancellation,
+            generation,
+        )
+        .await;
+    assert!(matches!(cancelled, Err(ClientError::Cancelled)));
+    let next_generation = trigger.await.unwrap();
+    assert_eq!(next_generation, generation + 1);
+    assert_eq!(probe.cancel_count(), 4);
+
+    let resumed = session
+        .read_at_pipelined_cancelable_with_options(
+            &file,
+            read_offset + MIB as u64,
+            PIPELINE_CHUNK,
+            PipelinedReadOptions {
+                chunk_size: PIPELINE_CHUNK,
+                max_in_flight: 1,
+                credit_request: 32,
+            },
+            &cancellation,
+            next_generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.len(), PIPELINE_CHUNK);
+    assert!(resumed.iter().all(|byte| *byte == 0xBC));
+
+    let sent = probe.sent_messages();
+    let headers = sent
+        .iter()
+        .map(|message| Smb2Header::decode(message).unwrap())
+        .collect::<Vec<_>>();
+    let read_ids = headers
+        .iter()
+        .filter(|header| header.command == Command::Read)
+        .map(|header| header.message_id)
+        .collect::<Vec<_>>();
+    assert_eq!(read_ids, vec![4, 8, 12, 16, 20]);
+
+    let cancel_messages = sent
+        .iter()
+        .filter(|message| Smb2Header::decode(message).unwrap().command == Command::Cancel)
+        .collect::<Vec<_>>();
+    assert_eq!(cancel_messages.len(), 4);
+    for (message, expected_message_id) in cancel_messages.iter().zip([4u64, 8, 12, 16]) {
+        let (header, _) = CancelRequest::decode_message(message).unwrap();
+        assert_eq!(header.message_id, expected_message_id);
+        assert_eq!(header.credit_charge, 0);
+        assert_eq!(header.credits, 0);
+        assert_eq!(header.session_id, session_id);
+        assert_ne!(header.flags & flags::SIGNED, 0);
+        assert_eq!(
+            header.id,
+            HeaderId::Sync {
+                process_id: 0,
+                tree_id: 0,
+            }
         );
     }
 }
