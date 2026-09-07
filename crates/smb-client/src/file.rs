@@ -136,12 +136,8 @@ where
             .connection
             .reserve_credits(credit_charge, options.credit_request)?;
         let message_id = self.connection.message_ids.allocate(credit_charge)?;
-        let mut request_message = request.encode_message(
-            message_id,
-            self.session_id,
-            tree.tree_id(),
-            credit_request,
-        )?;
+        let mut request_message =
+            request.encode_message(message_id, self.session_id, tree.tree_id(), credit_request)?;
         set_credit_charge(&mut request_message, credit_charge);
         if self.signing_required {
             let signing = self.signing.as_ref().ok_or(ClientError::Protocol(

@@ -66,9 +66,11 @@ where
         while out.len() < target {
             let remaining = target - out.len();
             let (supports_multi_credit, max_read_size) = {
-                let negotiated = self.connection.negotiated.as_ref().ok_or(
-                    ClientError::Protocol("READ requires negotiated parameters"),
-                )?;
+                let negotiated = self
+                    .connection
+                    .negotiated
+                    .as_ref()
+                    .ok_or(ClientError::Protocol("READ requires negotiated parameters"))?;
                 (
                     negotiated.supports_multi_credit(),
                     usize::try_from(negotiated.max_read_size)
@@ -76,10 +78,12 @@ where
                 )
             };
 
-            let available_credits = self
-                .connection
-                .available_credits()
-                .ok_or(ClientError::Protocol("SMB credit window is not initialized"))?;
+            let available_credits =
+                self.connection
+                    .available_credits()
+                    .ok_or(ClientError::Protocol(
+                        "SMB credit window is not initialized",
+                    ))?;
             if available_credits == 0 {
                 return Err(ClientError::Protocol(
                     "SMB connection has no credits available for READ",

@@ -263,8 +263,14 @@ async fn authenticated_session_reads_one_mib_above_four_gib_with_signing() {
 
     let body = &read_request[64..];
     assert_eq!(body[2], 0x50);
-    assert_eq!(u32::from_le_bytes(body[4..8].try_into().unwrap()), MIB as u32);
-    assert_eq!(u64::from_le_bytes(body[8..16].try_into().unwrap()), read_offset);
+    assert_eq!(
+        u32::from_le_bytes(body[4..8].try_into().unwrap()),
+        MIB as u32
+    );
+    assert_eq!(
+        u64::from_le_bytes(body[8..16].try_into().unwrap()),
+        read_offset
+    );
     assert_eq!(
         u64::from_le_bytes(body[16..24].try_into().unwrap()),
         0x1111_2222_3333_4444

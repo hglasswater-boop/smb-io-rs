@@ -132,7 +132,11 @@ where
         let negotiated = self.negotiated.as_ref().ok_or(ClientError::Protocol(
             "credit calculation requires negotiated parameters",
         ))?;
-        Ok(if negotiated.supports_multi_credit() { 1 } else { 0 })
+        Ok(if negotiated.supports_multi_credit() {
+            1
+        } else {
+            0
+        })
     }
 
     pub(crate) fn reserve_credits(
