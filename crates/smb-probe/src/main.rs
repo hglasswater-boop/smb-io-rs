@@ -2,30 +2,69 @@
 
 use std::error::Error;
 
-use smb_io_client::{Connection, Dialect, NegotiateConfig, TcpTransport, TcpTransportConfig};
+use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
+use smb_io_client::{
+    CloseOptions, Connection, Dialect, FileOpenOptions, NegotiateConfig, SessionConnection,
+    SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    let host = args.next().ok_or("usage: smb-io-probe <host> [port]")?;
-    let port = match args.next() {
-        Some(value) => value.parse::<u16>()?,
-        None => 445,
-    };
-    if args.next().is_some() {
-        return Err("usage: smb-io-probe <host> [port]".into());
+    let first = args.next().ok_or_else(usage)?;
+
+    match first.as_str() {
+        "negotiate" => {
+            let host = args.next().ok_or_else(usage)?;
+            let port = parse_port(args.next())?;
+            ensure_no_more(args)?;
+            run_negotiate(&host, port).await
+        }
+        "verify" => {
+            let request = VerifyRequest {
+                host: args.next().ok_or_else(verify_usage)?,
+                port: args
+                    .next()
+                    .ok_or_else(verify_usage)?
+                    .parse::<u16>()?,
+                share: args.next().ok_or_else(verify_usage)?,
+                path: args.next().ok_or_else(verify_usage)?,
+                username: dash_to_empty(args.next().ok_or_else(verify_usage)?),
+                password: dash_to_empty(args.next().ok_or_else(verify_usage)?),
+                offset: args
+                    .next()
+                    .ok_or_else(verify_usage)?
+                    .parse::<u64>()?,
+                expected: parse_hex(&args.next().ok_or_else(verify_usage)?)?,
+            };
+            ensure_no_more_with(args, verify_usage())?;
+            run_verify(request).await
+        }
+        host => {
+            // Preserve the original CLI for quick manual NEGOTIATE checks.
+            let port = parse_port(args.next())?;
+            ensure_no_more(args)?;
+            run_negotiate(host, port).await
+        }
     }
+}
 
-    let mut client_guid = [0u8; 16];
-    let mut preauth_salt = [0u8; 32];
-    getrandom::fill(&mut client_guid)?;
-    getrandom::fill(&mut preauth_salt)?;
+struct VerifyRequest {
+    host: String,
+    port: u16,
+    share: String,
+    path: String,
+    username: String,
+    password: String,
+    offset: u64,
+    expected: Vec<u8>,
+}
 
-    let transport = TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
-    let peer = transport.peer_addr()?;
-    let mut connection = Connection::new(transport);
-    let config = NegotiateConfig::modern(client_guid, preauth_salt.to_vec());
-    let negotiated = connection.negotiate(&config).await?.clone();
+async fn run_negotiate(host: &str, port: u16) -> Result<(), Box<dyn Error>> {
+    let (connection, peer) = negotiated_connection(host, port).await?;
+    let negotiated = connection
+        .negotiated()
+        .ok_or("NEGOTIATE completed without negotiated parameters")?;
 
     println!("peer: {peer}");
     println!("dialect: {}", dialect_name(negotiated.dialect));
@@ -43,6 +82,183 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     Ok(())
+}
+
+async fn run_verify(request: VerifyRequest) -> Result<(), Box<dyn Error>> {
+    if request.expected.is_empty() {
+        return Err("verify expected hex payload must not be empty".into());
+    }
+
+    let (connection, peer) = negotiated_connection(&request.host, request.port).await?;
+    let mut session = establish_session(connection, &request.username, &request.password).await?;
+    let unc = format!("\\\\{}\\{}", request.host, request.share);
+    let tree = session
+        .tree_connect(unc, TreeConnectOptions::default())
+        .await?;
+    let file = session
+        .open_file(&tree, &request.path, FileOpenOptions::read_existing_random())
+        .await?;
+
+    let expected_end = request
+        .offset
+        .checked_add(u64::try_from(request.expected.len())?)
+        .ok_or("verification offset overflow")?;
+    if expected_end > file.len() {
+        return Err(format!(
+            "verification range {:#x}..{:#x} exceeds file length {:#x}",
+            request.offset,
+            expected_end,
+            file.len()
+        )
+        .into());
+    }
+
+    let direct = session
+        .read_at(&file, request.offset, request.expected.len())
+        .await?;
+    if direct != request.expected {
+        return Err(format!(
+            "direct read mismatch at offset {:#x}: expected {}, got {}",
+            request.offset,
+            hex(&request.expected),
+            hex(&direct)
+        )
+        .into());
+    }
+
+    let pipelined = session
+        .read_at_pipelined(&file, request.offset, request.expected.len())
+        .await?;
+    if pipelined != request.expected {
+        return Err(format!(
+            "pipelined read mismatch at offset {:#x}: expected {}, got {}",
+            request.offset,
+            hex(&request.expected),
+            hex(&pipelined)
+        )
+        .into());
+    }
+
+    // Public random-access semantics must turn EOF into an empty result rather than an error or
+    // integer wrap. The wire layer separately handles STATUS_END_OF_FILE from the server.
+    if !session.read_at(&file, file.len(), 1).await?.is_empty() {
+        return Err("direct read at EOF returned data".into());
+    }
+    if !session
+        .read_at_pipelined(&file, file.len(), 1)
+        .await?
+        .is_empty()
+    {
+        return Err("pipelined read at EOF returned data".into());
+    }
+
+    println!("peer: {peer}");
+    println!("mechanism: {:?}", session.mechanism());
+    println!("signing_required: {}", session.signing_required());
+    println!("file_len: {}", file.len());
+    println!("verified_offset: {}", request.offset);
+    println!("verified_bytes: {}", request.expected.len());
+
+    session.close_file(file, CloseOptions::default()).await?;
+    println!("verified: true");
+    Ok(())
+}
+
+async fn negotiated_connection(
+    host: &str,
+    port: u16,
+) -> Result<(Connection<TcpTransport>, std::net::SocketAddr), Box<dyn Error>> {
+    let mut client_guid = [0u8; 16];
+    let mut preauth_salt = [0u8; 32];
+    getrandom::fill(&mut client_guid)?;
+    getrandom::fill(&mut preauth_salt)?;
+
+    let transport = TcpTransport::connect(host, port, TcpTransportConfig::default()).await?;
+    let peer = transport.peer_addr()?;
+    let mut connection = Connection::new(transport);
+    connection
+        .negotiate(&NegotiateConfig::modern(
+            client_guid,
+            preauth_salt.to_vec(),
+        ))
+        .await?;
+    Ok((connection, peer))
+}
+
+async fn establish_session(
+    connection: Connection<TcpTransport>,
+    username: &str,
+    password: &str,
+) -> Result<SessionConnection<TcpTransport>, Box<dyn Error>> {
+    if username.is_empty() {
+        let mut auth = AnonymousNtlmProvider::new();
+        Ok(connection
+            .session_setup(&mut auth, SessionSetupConfig::default())
+            .await?)
+    } else {
+        let credentials = NtlmCredentials::new(username, password);
+        let mut auth = NtlmV2Provider::new(credentials);
+        Ok(connection
+            .session_setup(&mut auth, SessionSetupConfig::default())
+            .await?)
+    }
+}
+
+fn parse_port(value: Option<String>) -> Result<u16, Box<dyn Error>> {
+    match value {
+        Some(value) => Ok(value.parse::<u16>()?),
+        None => Ok(445),
+    }
+}
+
+fn dash_to_empty(value: String) -> String {
+    if value == "-" { String::new() } else { value }
+}
+
+fn ensure_no_more(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    ensure_no_more_with(&mut args, usage())
+}
+
+fn ensure_no_more_with(
+    mut args: impl Iterator<Item = String>,
+    message: String,
+) -> Result<(), Box<dyn Error>> {
+    if args.next().is_some() {
+        return Err(message.into());
+    }
+    Ok(())
+}
+
+fn parse_hex(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let input = value.as_bytes();
+    if input.is_empty() || !input.len().is_multiple_of(2) {
+        return Err("hex payload must contain an even, non-zero number of digits".into());
+    }
+    let mut out = Vec::with_capacity(input.len() / 2);
+    for pair in input.chunks_exact(2) {
+        let high = hex_nibble(pair[0]).ok_or("hex payload contains a non-hex digit")?;
+        let low = hex_nibble(pair[1]).ok_or("hex payload contains a non-hex digit")?;
+        out.push((high << 4) | low);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 fn dialect_name(dialect: Dialect) -> &'static str {
@@ -64,6 +280,16 @@ fn format_guid(guid: [u8; 16]) -> String {
     out
 }
 
+fn usage() -> String {
+    "usage: smb-io-probe [negotiate] <host> [port]\n       smb-io-probe verify <host> <port> <share> <path> <username|-> <password|-> <offset> <expected-hex>"
+        .to_string()
+}
+
+fn verify_usage() -> String {
+    "usage: smb-io-probe verify <host> <port> <share> <path> <username|-> <password|-> <offset> <expected-hex>"
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +303,16 @@ mod tests {
     #[test]
     fn guid_formatter_is_fixed_width_hex() {
         assert_eq!(format_guid([0xAB; 16]), "abababababababababababababababab");
+    }
+
+    #[test]
+    fn hex_parser_accepts_mixed_case() {
+        assert_eq!(parse_hex("00AaFf").unwrap(), vec![0x00, 0xaa, 0xff]);
+    }
+
+    #[test]
+    fn dash_is_anonymous_cli_sentinel() {
+        assert_eq!(dash_to_empty("-".to_string()), "");
+        assert_eq!(dash_to_empty("alice".to_string()), "alice");
     }
 }
