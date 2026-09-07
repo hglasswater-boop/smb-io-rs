@@ -3,13 +3,16 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
+use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::{
-    ClientError, Connection, FileHandle, FileOpenOptions, NegotiateConfig, ReadCancellationToken,
-    SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
+    ClientError, CloseOptions, Connection, DurableFileHandle, DurableHandleV2Options, FileHandle,
+    FileOpenOptions, NegotiateConfig, ReadCancellationToken, SessionConnection, SessionSetupConfig,
+    TcpTransport, TcpTransportConfig, TreeConnectOptions,
 };
 
+pub const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
 pub const STATUS_NETWORK_NAME_DELETED: u32 = 0xC000_00C9;
 pub const STATUS_USER_SESSION_DELETED: u32 = 0xC000_0203;
 pub const STATUS_NETWORK_SESSION_EXPIRED: u32 = 0xC000_035C;
@@ -41,11 +44,17 @@ fn timestamp_matches(original: u64, reopened: u64) -> bool {
     original == 0 || reopened == 0 || original == reopened
 }
 
+#[derive(Default)]
+struct DurableRecoveryState {
+    handle: Option<DurableFileHandle>,
+    unavailable: bool,
+}
+
 /// Reusable recipe for restoring a read-only SMB file after a transport/session failure.
 ///
-/// The recipe deliberately records the first CREATE metadata and refuses to silently reopen a
-/// different file that happens to appear at the same path. This reopen-by-path validation is a
-/// conservative bridge until Durable Handle V2 support can preserve stronger server identity.
+/// Path reopen is always guarded by the first CREATE metadata so a different file at the same path
+/// is never silently accepted. Durable Handle V2 can be explicitly enabled for consumers that can
+/// also service the BATCH-oplock lifecycle; when enabled, DH2C is attempted before path reopen.
 pub struct ReadOnlyReconnectRecipe {
     host: String,
     port: u16,
@@ -56,6 +65,9 @@ pub struct ReadOnlyReconnectRecipe {
     domain: String,
     workstation: String,
     identity: OnceLock<FileIdentity>,
+    client_guid: OnceLock<[u8; 16]>,
+    durable_v2_enabled: bool,
+    durable: Mutex<DurableRecoveryState>,
 }
 
 impl ReadOnlyReconnectRecipe {
@@ -80,7 +92,35 @@ impl ReadOnlyReconnectRecipe {
             domain,
             workstation,
             identity: OnceLock::new(),
+            client_guid: OnceLock::new(),
+            durable_v2_enabled: false,
+            durable: Mutex::new(DurableRecoveryState::default()),
         }
+    }
+
+    /// Explicitly opts this logical read-only open into Durable Handle V2 recovery.
+    ///
+    /// This remains opt-in until the shared request broker can service unsolicited oplock breaks.
+    pub fn with_durable_v2(mut self, enabled: bool) -> Self {
+        self.durable_v2_enabled = enabled;
+        self
+    }
+
+    pub fn durable_v2_enabled(&self) -> bool {
+        self.durable_v2_enabled
+    }
+
+    fn client_guid(&self) -> Result<[u8; 16], ReconnectError> {
+        if let Some(guid) = self.client_guid.get() {
+            return Ok(*guid);
+        }
+
+        let guid = random_guid()?;
+        let _ = self.client_guid.set(guid);
+        self.client_guid
+            .get()
+            .copied()
+            .ok_or(ReconnectError::RandomSource)
     }
 
     fn remember_or_validate_file(&self, file: &FileHandle) -> Result<(), ClientError> {
@@ -158,17 +198,22 @@ pub fn is_retryable_client_error(error: &ClientError) -> bool {
         ClientError::Wire(_)
         | ClientError::Auth(_)
         | ClientError::Cancelled
+        | ClientError::Capability(_)
         | ClientError::Protocol(_) => false,
     }
 }
 
-/// Establishes a fresh transport/session/tree and reopens the configured read-only file.
+/// Establishes a fresh transport/session/tree and restores the configured read-only file.
+///
+/// With Durable V2 enabled, a remembered durable open is re-established with DH2C first. A stale
+/// durable open may fall back only on the protocol-defined STATUS_OBJECT_NAME_NOT_FOUND outcome or
+/// an explicitly unavailable capability. Malformed/security failures never fall through to a path
+/// reopen.
 pub async fn connect_read_only_file(
     recipe: &ReadOnlyReconnectRecipe,
 ) -> Result<(SessionConnection<TcpTransport>, FileHandle), ReconnectError> {
-    let mut client_guid = [0u8; 16];
+    let client_guid = recipe.client_guid()?;
     let mut preauth_salt = [0u8; 32];
-    getrandom::fill(&mut client_guid).map_err(|_| ReconnectError::RandomSource)?;
     getrandom::fill(&mut preauth_salt).map_err(|_| ReconnectError::RandomSource)?;
 
     let transport =
@@ -202,6 +247,71 @@ pub async fn connect_read_only_file(
     let tree = session
         .tree_connect(unc_share, TreeConnectOptions::default())
         .await?;
+
+    if recipe.durable_v2_enabled {
+        let mut durable_state = recipe.durable.lock().await;
+
+        if let Some(existing) = durable_state.handle.clone() {
+            match session
+                .reconnect_file_durable_v2(&tree, &existing)
+                .await
+            {
+                Ok(refreshed) => {
+                    let file = refreshed.file().clone();
+                    if let Err(error) = recipe.remember_or_validate_file(&file) {
+                        durable_state.handle = None;
+                        let _ = session
+                            .close_file(refreshed.into_file(), CloseOptions::default())
+                            .await;
+                        return Err(error.into());
+                    }
+                    durable_state.handle = Some(refreshed);
+                    return Ok((session, file));
+                }
+                Err(ClientError::ServerStatus(STATUS_OBJECT_NAME_NOT_FOUND)) => {
+                    // The server no longer has this durable Open, for example after an smbd
+                    // restart. It is safe to create a new durable open, still guarded by identity.
+                    durable_state.handle = None;
+                }
+                Err(ClientError::Capability(_)) => {
+                    durable_state.handle = None;
+                    durable_state.unavailable = true;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        if !durable_state.unavailable {
+            let create_guid = random_guid()?;
+            match session
+                .open_file_durable_v2(
+                    &tree,
+                    &recipe.path,
+                    FileOpenOptions::read_existing_random(),
+                    create_guid,
+                    DurableHandleV2Options::default(),
+                )
+                .await
+            {
+                Ok(opened) => {
+                    let file = opened.file().clone();
+                    if let Err(error) = recipe.remember_or_validate_file(&file) {
+                        let _ = session
+                            .close_file(opened.into_file(), CloseOptions::default())
+                            .await;
+                        return Err(error.into());
+                    }
+                    durable_state.handle = Some(opened);
+                    return Ok((session, file));
+                }
+                Err(ClientError::Capability(_)) => {
+                    durable_state.unavailable = true;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     let file = session
         .open_file(&tree, &recipe.path, FileOpenOptions::read_existing_random())
         .await?;
@@ -222,11 +332,30 @@ pub async fn connect_read_only_file_cancelable(
     }
 }
 
+fn random_guid() -> Result<[u8; 16], ReconnectError> {
+    let mut guid = [0u8; 16];
+    getrandom::fill(&mut guid).map_err(|_| ReconnectError::RandomSource)?;
+    Ok(guid)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
 
     use super::*;
+
+    fn recipe() -> ReadOnlyReconnectRecipe {
+        ReadOnlyReconnectRecipe::new(
+            "nas.local".to_string(),
+            445,
+            "video".to_string(),
+            "movie.mkv".to_string(),
+            "user".to_string(),
+            "password".to_string(),
+            String::new(),
+            String::new(),
+        )
+    }
 
     #[test]
     fn transport_and_session_lifetime_failures_are_retryable() {
@@ -247,14 +376,23 @@ mod tests {
     }
 
     #[test]
-    fn security_and_protocol_failures_are_never_retried() {
+    fn security_protocol_and_capability_failures_are_never_retried_as_transport() {
         assert!(!is_retryable_client_error(&ClientError::Protocol(
             "bad frame"
+        )));
+        assert!(!is_retryable_client_error(&ClientError::Capability(
+            "optional feature unavailable"
         )));
         assert!(!is_retryable_client_error(&ClientError::Cancelled));
         assert!(!is_retryable_client_error(&ClientError::ServerStatus(
             0xC000_0022,
         )));
+    }
+
+    #[test]
+    fn durable_v2_recovery_is_explicitly_opt_in() {
+        assert!(!recipe().durable_v2_enabled());
+        assert!(recipe().with_durable_v2(true).durable_v2_enabled());
     }
 
     #[test]
