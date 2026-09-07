@@ -13,6 +13,7 @@ mod preauth;
 mod session;
 mod signing;
 mod transport;
+mod tree;
 
 pub use error::ClientError;
 pub use message_id::MessageIdAllocator;
@@ -24,3 +25,4 @@ pub use session::{
 pub use signing::{SigningAlgorithm, SigningState};
 pub use smb_io_wire::Dialect;
 pub use transport::{TcpTransport, TcpTransportConfig, Transport};
+pub use tree::{TreeConnectOptions, TreeHandle};
