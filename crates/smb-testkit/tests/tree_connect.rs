@@ -9,6 +9,9 @@ use smb_io_wire::{
     create_action, flags, security_mode, share_flags, share_type,
 };
 
+const MIB: usize = 1024 * 1024;
+const GIB: u64 = 1024 * 1024 * 1024;
+
 struct StaticAuth {
     key: Option<SecretBytes>,
 }
@@ -129,8 +132,8 @@ fn signed_create_response(session_id: u64, tree_id: u32, signing: &SigningState)
     let mut body = vec![0u8; 88];
     put_u16(&mut body, 0, 89);
     put_u32(&mut body, 4, create_action::OPENED);
-    put_u64(&mut body, 40, 1_100_000_000);
-    put_u64(&mut body, 48, 1_073_741_824);
+    put_u64(&mut body, 40, 6 * GIB + MIB as u64);
+    put_u64(&mut body, 48, 6 * GIB);
     put_u32(&mut body, 56, 0x20);
     put_u64(&mut body, 64, 0x1111_2222_3333_4444);
     put_u64(&mut body, 72, 0x5555_6666_7777_8888);
@@ -139,11 +142,35 @@ fn signed_create_response(session_id: u64, tree_id: u32, signing: &SigningState)
     message
 }
 
+fn signed_read_response(session_id: u64, tree_id: u32, signing: &SigningState) -> Vec<u8> {
+    let data = vec![0xA7; MIB];
+    let mut header = Smb2Header::request(Command::Read, 4, 16, 32);
+    header.flags = flags::SERVER_TO_REDIR;
+    header.status = StatusField::Status(0);
+    header.session_id = session_id;
+    header.id = HeaderId::Sync {
+        process_id: 0,
+        tree_id,
+    };
+    let mut message = header.encode().to_vec();
+    let mut body = vec![0u8; 16];
+    put_u16(&mut body, 0, 17);
+    body[2] = 0x50;
+    put_u32(&mut body, 4, MIB as u32);
+    put_u32(&mut body, 8, 0);
+    put_u32(&mut body, 12, 0);
+    message.extend_from_slice(&body);
+    message.extend_from_slice(&data);
+    signing.sign(&mut message).unwrap();
+    message
+}
+
 #[tokio::test]
-async fn authenticated_session_connects_tree_and_opens_file_with_signing() {
+async fn authenticated_session_reads_one_mib_above_four_gib_with_signing() {
     let session_key = [0xA5; 16];
     let session_id = 0x1122_3344_5566_7788;
     let tree_id = 0x42;
+    let read_offset = 4 * GIB + 12_345;
     let signing = SigningState::derive(
         Dialect::Smb302,
         SigningAlgorithm::AesCmac,
@@ -157,6 +184,7 @@ async fn authenticated_session_connects_tree_and_opens_file_with_signing() {
         signed_session_response(session_id, &signing),
         signed_tree_response(session_id, tree_id, &signing),
         signed_create_response(session_id, tree_id, &signing),
+        signed_read_response(session_id, tree_id, &signing),
     ]);
     let mut connection = Connection::new(transport);
     let config = NegotiateConfig {
@@ -198,17 +226,22 @@ async fn authenticated_session_connects_tree_and_opens_file_with_signing() {
         .unwrap();
     assert_eq!(file.tree_id(), tree_id);
     assert_eq!(file.path(), "movies\\sample.mkv");
-    assert_eq!(file.len(), 1_073_741_824);
-    assert_eq!(file.allocation_size(), 1_100_000_000);
+    assert_eq!(file.len(), 6 * GIB);
+    assert_eq!(file.allocation_size(), 6 * GIB + MIB as u64);
     assert_eq!(file.file_id().persistent, 0x1111_2222_3333_4444);
     assert_eq!(file.file_id().volatile, 0x5555_6666_7777_8888);
 
+    let data = session.read_at(&file, read_offset, MIB).await.unwrap();
+    assert_eq!(data.len(), MIB);
+    assert!(data.iter().all(|byte| *byte == 0xA7));
+
     let transport = session.into_connection().into_transport();
-    assert_eq!(transport.sent_messages().len(), 4);
+    assert_eq!(transport.sent_messages().len(), 5);
 
     let tree_request_message = &transport.sent_messages()[2];
     let tree_header = Smb2Header::decode(tree_request_message).unwrap();
     assert_eq!(tree_header.command, Command::TreeConnect);
+    assert_eq!(tree_header.credit_charge, 1);
     assert_eq!(tree_header.session_id, session_id);
     assert_ne!(tree_header.flags & flags::SIGNED, 0);
     let request = TreeConnectRequest::decode_message(tree_request_message).unwrap();
@@ -216,6 +249,28 @@ async fn authenticated_session_connects_tree_and_opens_file_with_signing() {
 
     let create_header = Smb2Header::decode(&transport.sent_messages()[3]).unwrap();
     assert_eq!(create_header.command, Command::Create);
+    assert_eq!(create_header.credit_charge, 1);
     assert_eq!(create_header.session_id, session_id);
     assert_ne!(create_header.flags & flags::SIGNED, 0);
+
+    let read_request = &transport.sent_messages()[4];
+    let read_header = Smb2Header::decode(read_request).unwrap();
+    assert_eq!(read_header.command, Command::Read);
+    assert_eq!(read_header.message_id, 4);
+    assert_eq!(read_header.credit_charge, 16);
+    assert_eq!(read_header.session_id, session_id);
+    assert_ne!(read_header.flags & flags::SIGNED, 0);
+
+    let body = &read_request[64..];
+    assert_eq!(body[2], 0x50);
+    assert_eq!(u32::from_le_bytes(body[4..8].try_into().unwrap()), MIB as u32);
+    assert_eq!(u64::from_le_bytes(body[8..16].try_into().unwrap()), read_offset);
+    assert_eq!(
+        u64::from_le_bytes(body[16..24].try_into().unwrap()),
+        0x1111_2222_3333_4444
+    );
+    assert_eq!(
+        u64::from_le_bytes(body[24..32].try_into().unwrap()),
+        0x5555_6666_7777_8888
+    );
 }
