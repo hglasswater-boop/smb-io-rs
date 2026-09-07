@@ -2,8 +2,8 @@ use std::error::Error;
 use std::fmt;
 
 use smb_io_client::{
-    ClientError, FileHandle, PipelinedReadOptions, ReadCancellationToken, SessionConnection,
-    Transport,
+    ClientError, FileHandle, PipelinedReadOptions, ReadCancellationToken, ReconnectError,
+    RecoveringReadOnlyFile, SessionConnection, Transport,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -29,14 +29,25 @@ impl Default for VideoReaderConfig {
 #[derive(Debug)]
 pub enum StreamError {
     Client(ClientError),
+    Reconnect(ReconnectError),
     InvalidConfig(&'static str),
     OffsetOverflow,
+}
+
+impl StreamError {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(
+            self,
+            Self::Client(ClientError::Cancelled) | Self::Reconnect(ReconnectError::Cancelled)
+        )
+    }
 }
 
 impl fmt::Display for StreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Client(error) => write!(f, "SMB client error: {error}"),
+            Self::Reconnect(error) => write!(f, "SMB reconnect error: {error}"),
             Self::InvalidConfig(message) => write!(f, "invalid stream configuration: {message}"),
             Self::OffsetOverflow => f.write_str("stream offset overflow"),
         }
@@ -47,6 +58,7 @@ impl Error for StreamError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Client(error) => Some(error),
+            Self::Reconnect(error) => Some(error),
             Self::InvalidConfig(_) | Self::OffsetOverflow => None,
         }
     }
@@ -55,6 +67,12 @@ impl Error for StreamError {
 impl From<ClientError> for StreamError {
     fn from(value: ClientError) -> Self {
         Self::Client(value)
+    }
+}
+
+impl From<ReconnectError> for StreamError {
+    fn from(value: ReconnectError) -> Self {
+        Self::Reconnect(value)
     }
 }
 
@@ -73,9 +91,7 @@ impl CachedWindow {
     }
 
     fn contains(&self, offset: u64, length: usize) -> Result<bool, StreamError> {
-        let requested_end = offset
-            .checked_add(u64::try_from(length).map_err(|_| StreamError::OffsetOverflow)?)
-            .ok_or(StreamError::OffsetOverflow)?;
+        let requested_end = request_end(offset, length)?;
         Ok(offset >= self.start && requested_end <= self.end()?)
     }
 
@@ -90,6 +106,17 @@ impl CachedWindow {
             .ok_or(StreamError::OffsetOverflow)?;
         Ok(Some(self.data[relative..end].to_vec()))
     }
+}
+
+#[derive(Debug)]
+enum PreparedRead {
+    Empty,
+    Cached(Vec<u8>),
+    Fetch {
+        target: usize,
+        fetch_len: usize,
+        reader_generation: u64,
+    },
 }
 
 /// Stateful video-oriented reader layered on positional SMB reads.
@@ -185,6 +212,36 @@ impl VideoReader {
         .await
     }
 
+    /// Reads through a reconnecting read-only file while preserving the same cache/read-ahead
+    /// behavior as `read`.
+    pub async fn read_recovering(
+        &mut self,
+        source: &mut RecoveringReadOnlyFile,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, StreamError> {
+        self.read_recovering_impl(source, offset, length, None).await
+    }
+
+    /// Cancellation-aware reconnecting read. A seek generation change cancels both outstanding SMB
+    /// requests and any reconnect attempt before stale data can enter the cache.
+    pub async fn read_recovering_cancelable(
+        &mut self,
+        source: &mut RecoveringReadOnlyFile,
+        offset: u64,
+        length: usize,
+        cancellation: &ReadCancellationToken,
+        generation: u64,
+    ) -> Result<Vec<u8>, StreamError> {
+        self.read_recovering_impl(
+            source,
+            offset,
+            length,
+            Some((cancellation, generation)),
+        )
+        .await
+    }
+
     async fn read_impl<T>(
         &mut self,
         session: &mut SessionConnection<T>,
@@ -196,44 +253,16 @@ impl VideoReader {
     where
         T: Transport,
     {
-        ensure_not_cancelled(cancellation)?;
-        if length == 0 || offset >= file.len() {
-            return Ok(Vec::new());
-        }
-
-        let target = target_len(file, offset, length)?;
-        if let Some(cache) = self.cache.as_ref() {
-            if cache.generation == self.generation {
-                if let Some(data) = cache.slice(offset, target)? {
-                    ensure_not_cancelled(cancellation)?;
-                    self.last_request_end = Some(
-                        offset
-                            .checked_add(
-                                u64::try_from(data.len())
-                                    .map_err(|_| StreamError::OffsetOverflow)?,
-                            )
-                            .ok_or(StreamError::OffsetOverflow)?,
-                    );
-                    return Ok(data);
-                }
-            }
-        }
-
-        if self.is_seek_miss(offset)? {
-            self.bump_generation();
-            self.cache = None;
-        }
-
-        let remaining = usize::try_from(file.len() - offset).unwrap_or(usize::MAX);
-        let fetch_len = if target > self.config.max_cache_bytes {
-            target
-        } else {
-            target
-                .max(self.config.read_ahead_bytes)
-                .min(self.config.max_cache_bytes)
-                .min(remaining)
+        let prepared = self.prepare_read(file.len(), offset, length, cancellation)?;
+        let PreparedRead::Fetch {
+            target,
+            fetch_len,
+            reader_generation,
+        } = prepared
+        else {
+            return prepared.into_result();
         };
-        let reader_generation = self.generation;
+
         let fetched = if let Some((token, generation)) = cancellation {
             session
                 .read_at_pipelined_cancelable_with_options(
@@ -251,6 +280,110 @@ impl VideoReader {
                 .await?
         };
 
+        self.finish_fetch(
+            offset,
+            target,
+            reader_generation,
+            fetched,
+            cancellation,
+        )
+    }
+
+    async fn read_recovering_impl(
+        &mut self,
+        source: &mut RecoveringReadOnlyFile,
+        offset: u64,
+        length: usize,
+        cancellation: Option<(&ReadCancellationToken, u64)>,
+    ) -> Result<Vec<u8>, StreamError> {
+        let prepared = self.prepare_read(source.len(), offset, length, cancellation)?;
+        let PreparedRead::Fetch {
+            target,
+            fetch_len,
+            reader_generation,
+        } = prepared
+        else {
+            return prepared.into_result();
+        };
+
+        let fetched = if let Some((token, generation)) = cancellation {
+            source
+                .read_at_pipelined_cancelable_with_options(
+                    offset,
+                    fetch_len,
+                    self.config.pipeline,
+                    token,
+                    generation,
+                )
+                .await?
+        } else {
+            source
+                .read_at_pipelined_with_options(offset, fetch_len, self.config.pipeline)
+                .await?
+        };
+
+        self.finish_fetch(
+            offset,
+            target,
+            reader_generation,
+            fetched,
+            cancellation,
+        )
+    }
+
+    fn prepare_read(
+        &mut self,
+        file_len: u64,
+        offset: u64,
+        length: usize,
+        cancellation: Option<(&ReadCancellationToken, u64)>,
+    ) -> Result<PreparedRead, StreamError> {
+        ensure_not_cancelled(cancellation)?;
+        if length == 0 || offset >= file_len {
+            return Ok(PreparedRead::Empty);
+        }
+
+        let target = target_len(file_len, offset, length)?;
+        if let Some(cache) = self.cache.as_ref() {
+            if cache.generation == self.generation {
+                if let Some(data) = cache.slice(offset, target)? {
+                    ensure_not_cancelled(cancellation)?;
+                    self.last_request_end = Some(request_end(offset, data.len())?);
+                    return Ok(PreparedRead::Cached(data));
+                }
+            }
+        }
+
+        if self.is_seek_miss(offset)? {
+            self.bump_generation();
+            self.cache = None;
+        }
+
+        let remaining = usize::try_from(file_len - offset).unwrap_or(usize::MAX);
+        let fetch_len = if target > self.config.max_cache_bytes {
+            target
+        } else {
+            target
+                .max(self.config.read_ahead_bytes)
+                .min(self.config.max_cache_bytes)
+                .min(remaining)
+        };
+
+        Ok(PreparedRead::Fetch {
+            target,
+            fetch_len,
+            reader_generation: self.generation,
+        })
+    }
+
+    fn finish_fetch(
+        &mut self,
+        offset: u64,
+        target: usize,
+        reader_generation: u64,
+        fetched: Vec<u8>,
+        cancellation: Option<(&ReadCancellationToken, u64)>,
+    ) -> Result<Vec<u8>, StreamError> {
         ensure_not_cancelled(cancellation)?;
         if reader_generation != self.generation {
             return Ok(Vec::new());
@@ -258,11 +391,7 @@ impl VideoReader {
 
         let returned_len = target.min(fetched.len());
         let result = fetched[..returned_len].to_vec();
-        self.last_request_end = Some(
-            offset
-                .checked_add(u64::try_from(returned_len).map_err(|_| StreamError::OffsetOverflow)?)
-                .ok_or(StreamError::OffsetOverflow)?,
-        );
+        self.last_request_end = Some(request_end(offset, returned_len)?);
 
         if fetched.len() <= self.config.max_cache_bytes {
             self.cache = Some(CachedWindow {
@@ -297,6 +426,18 @@ impl VideoReader {
 
     fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+impl PreparedRead {
+    fn into_result(self) -> Result<Vec<u8>, StreamError> {
+        match self {
+            Self::Empty => Ok(Vec::new()),
+            Self::Cached(data) => Ok(data),
+            Self::Fetch { .. } => Err(StreamError::InvalidConfig(
+                "internal fetch plan was not executed",
+            )),
+        }
     }
 }
 
@@ -335,9 +476,15 @@ fn validate_config(config: VideoReaderConfig) -> Result<(), StreamError> {
     Ok(())
 }
 
-fn target_len(file: &FileHandle, offset: u64, length: usize) -> Result<usize, StreamError> {
+fn request_end(offset: u64, length: usize) -> Result<u64, StreamError> {
+    offset
+        .checked_add(u64::try_from(length).map_err(|_| StreamError::OffsetOverflow)?)
+        .ok_or(StreamError::OffsetOverflow)
+}
+
+fn target_len(file_len: u64, offset: u64, length: usize) -> Result<usize, StreamError> {
     let requested = u64::try_from(length).map_err(|_| StreamError::OffsetOverflow)?;
-    usize::try_from(requested.min(file.len() - offset)).map_err(|_| StreamError::OffsetOverflow)
+    usize::try_from(requested.min(file_len - offset)).map_err(|_| StreamError::OffsetOverflow)
 }
 
 #[cfg(test)]
@@ -392,5 +539,27 @@ mod tests {
             ensure_not_cancelled(Some((&token, generation))),
             Err(StreamError::Client(ClientError::Cancelled))
         ));
+    }
+
+    #[test]
+    fn reconnect_cancellation_is_recognized_as_stream_cancellation() {
+        let error = StreamError::Reconnect(ReconnectError::Cancelled);
+        assert!(error.is_cancelled());
+    }
+
+    #[test]
+    fn cache_hit_and_network_fetch_share_one_read_plan() {
+        let mut reader = VideoReader::new(VideoReaderConfig::default()).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: (0u8..32).collect(),
+        });
+
+        let cached = reader.prepare_read(1_000, 108, 4, None).unwrap();
+        assert!(matches!(cached, PreparedRead::Cached(data) if data == vec![8, 9, 10, 11]));
+
+        let fetch = reader.prepare_read(1_000, 500, 4, None).unwrap();
+        assert!(matches!(fetch, PreparedRead::Fetch { target: 4, .. }));
     }
 }
