@@ -5,8 +5,12 @@
 //! Owns request splitting/reassembly, priority scheduling, adaptive read-ahead,
 //! bounded range caching, cancellation generations, and workload metrics.
 
+mod broker;
 mod video;
 
+pub use broker::{
+    BrokerError, VideoBrokerConfig, VideoBrokerHandle, VideoBrokerRunner, video_broker,
+};
 pub use video::{StreamError, VideoReader, VideoReaderConfig};
 
 /// Scheduling classes used by the stream request broker.
