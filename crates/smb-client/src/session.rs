@@ -224,29 +224,37 @@ where
                 ));
             }
 
-            let session_key = provider.take_session_key();
-            if mechanism != AuthMechanism::Anonymous && session_key.is_none() {
+            let mut session_key = provider.take_session_key();
+            let negotiated = self.negotiated.as_ref().ok_or(ClientError::Protocol(
+                "negotiated parameters disappeared during SESSION_SETUP",
+            ))?;
+            let is_guest = response.session_flags & session_flags::IS_GUEST != 0;
+            let is_null = response.session_flags & session_flags::IS_NULL != 0;
+            // Servers MAY omit IS_NULL for an anonymous GSS/NTLM context, so the provider
+            // mechanism is authoritative as well as the response flag.
+            let is_anonymous = mechanism == AuthMechanism::Anonymous || is_null;
+            let is_guest_or_null = is_guest || is_anonymous;
+            let is_encrypted = response.session_flags & session_flags::ENCRYPT_DATA != 0;
+
+            if !is_guest_or_null && session_key.is_none() {
                 return Err(ClientError::Protocol(
                     "authenticated session completed without a session key",
                 ));
             }
+            // Anonymous and guest sessions intentionally do not have a usable signing key.
+            if is_guest_or_null {
+                session_key = None;
+            }
 
-            let negotiated = self.negotiated.as_ref().ok_or(ClientError::Protocol(
-                "negotiated parameters disappeared during SESSION_SETUP",
-            ))?;
-            let is_guest_or_null =
-                response.session_flags & (session_flags::IS_GUEST | session_flags::IS_NULL) != 0;
-            let is_encrypted = response.session_flags & session_flags::ENCRYPT_DATA != 0;
-            let signing_required = negotiated.require_signing && !is_guest_or_null && !is_encrypted;
+            let signing_required =
+                negotiated.require_signing && !is_guest_or_null && !is_encrypted;
             let signing = match session_key.as_ref() {
-                Some(key) if mechanism != AuthMechanism::Anonymous && !is_guest_or_null => {
-                    Some(SigningState::derive(
-                        negotiated.dialect,
-                        negotiated.signing_algorithm,
-                        key,
-                        self.preauth_hash.as_ref(),
-                    )?)
-                }
+                Some(key) if !is_guest_or_null => Some(SigningState::derive(
+                    negotiated.dialect,
+                    negotiated.signing_algorithm,
+                    key,
+                    self.preauth_hash.as_ref(),
+                )?),
                 _ => None,
             };
 
@@ -255,9 +263,9 @@ where
                     "server signed SESSION_SETUP without an available signing key",
                 ))?;
                 signing.verify(&mut response_message)?;
-            } else if negotiated.dialect == Dialect::Smb311 {
+            } else if negotiated.dialect == Dialect::Smb311 && !is_guest_or_null {
                 return Err(ClientError::Protocol(
-                    "SMB 3.1.1 final SESSION_SETUP response must be signed",
+                    "SMB 3.1.1 final SESSION_SETUP response must be signed for a normal session",
                 ));
             } else if signing_required {
                 return Err(ClientError::Protocol(
