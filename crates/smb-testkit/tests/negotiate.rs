@@ -64,6 +64,7 @@ async fn negotiates_smb302_and_records_exact_request() {
         capabilities: capabilities::LARGE_MTU,
         client_guid: [0x11; 16],
         preauth_salt: Vec::new(),
+        signing_algorithms: Vec::new(),
         credit_request: 32,
     };
 
@@ -99,6 +100,7 @@ async fn mismatched_message_id_is_rejected() {
         capabilities: capabilities::LARGE_MTU,
         client_guid: [0x44; 16],
         preauth_salt: Vec::new(),
+        signing_algorithms: Vec::new(),
         credit_request: 8,
     };
 
