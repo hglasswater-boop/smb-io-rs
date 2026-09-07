@@ -9,12 +9,11 @@ use std::sync::OnceLock;
 
 use jni::errors::{Result as JniResult, ThrowRuntimeExAndDefault};
 use jni::objects::{JByteArray, JObject, JString};
+use jni::strings::{JNIStr, JNIString};
 use jni::sys::{jbyte, jint, jlong};
-use jni::{Env, EnvUnowned, jni_mangle};
+use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
 use crate::{API_VERSION, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest};
-
-const JAVA_CLASS: &str = "app.local1st.files.core.fs.rust.RustSmbNative";
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
 
@@ -29,24 +28,30 @@ fn engine() -> Result<&'static AndroidEngine, String> {
 
 fn throw_exception<T: Default>(
     env: &mut Env<'_>,
-    class: &str,
+    class: &'static JNIStr,
     message: impl Display,
 ) -> JniResult<T> {
-    env.throw_new(class, message.to_string())?;
+    let message = JNIString::new(message.to_string());
+    env.throw_new(class, message.as_ref())?;
     Ok(T::default())
 }
 
 fn throw_io<T: Default>(env: &mut Env<'_>, error: impl Display) -> JniResult<T> {
-    throw_exception(env, "java/io/IOException", error)
+    throw_exception(env, jni_str!("java/io/IOException"), error)
 }
 
 fn throw_argument<T: Default>(env: &mut Env<'_>, message: impl Display) -> JniResult<T> {
-    throw_exception(env, "java/lang/IllegalArgumentException", message)
+    throw_exception(
+        env,
+        jni_str!("java/lang/IllegalArgumentException"),
+        message,
+    )
 }
 
 fn video_handle(env: &mut Env<'_>, raw: jlong) -> JniResult<Option<VideoHandle>> {
     if raw <= 0 {
-        return throw_argument(env, "SMB video handle must be positive").map(|_| None);
+        throw_argument::<()>(env, "SMB video handle must be positive")?;
+        return Ok(None);
     }
     Ok(Some(VideoHandle::from_raw(raw as u64)))
 }
@@ -66,7 +71,7 @@ fn as_jbytes(bytes: &[u8]) -> &[jbyte] {
     unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<jbyte>(), bytes.len()) }
 }
 
-#[jni_mangle(JAVA_CLASS)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_api_version<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
@@ -77,7 +82,7 @@ pub fn native_api_version<'local>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[jni_mangle(JAVA_CLASS)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_open_video<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
@@ -125,7 +130,7 @@ pub fn native_open_video<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-#[jni_mangle(JAVA_CLASS)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_len<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
@@ -151,7 +156,7 @@ pub fn native_len<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-#[jni_mangle(JAVA_CLASS)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_read_at<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
@@ -203,7 +208,7 @@ pub fn native_read_at<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-#[jni_mangle(JAVA_CLASS)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_seek<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
@@ -233,7 +238,7 @@ pub fn native_seek<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-#[jni_mangle(JAVA_CLASS)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_close<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
