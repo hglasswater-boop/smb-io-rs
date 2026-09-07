@@ -52,6 +52,14 @@ pub struct TcpTransport {
     io_timeout: Duration,
     max_message_size: usize,
     read_buffer: Vec<u8>,
+    /// Reusable network scratch storage kept on the heap.
+    ///
+    /// Keeping the 64 KiB receive chunk as an async-local array makes every
+    /// `receive_message()` future tens of kilobytes larger. Deep but valid protocol call chains
+    /// such as reconnect -> session setup -> receive can then exhaust a Tokio worker stack while
+    /// polling nested futures. A transport-owned buffer keeps the future itself small and avoids
+    /// one allocation per socket read.
+    read_chunk: Vec<u8>,
 }
 
 impl TcpTransport {
@@ -74,6 +82,7 @@ impl TcpTransport {
             io_timeout: config.io_timeout,
             max_message_size: config.max_message_size,
             read_buffer: Vec::with_capacity(TCP_READ_CHUNK_SIZE),
+            read_chunk: vec![0u8; TCP_READ_CHUNK_SIZE],
         })
     }
 
@@ -127,8 +136,7 @@ impl Transport for TcpTransport {
                 return Ok(message);
             }
 
-            let mut chunk = [0u8; TCP_READ_CHUNK_SIZE];
-            let read = timeout(self.io_timeout, self.stream.read(&mut chunk))
+            let read = timeout(self.io_timeout, self.stream.read(&mut self.read_chunk))
                 .await
                 .map_err(|_| ClientError::Timeout("TCP message read"))??;
             if read == 0 {
@@ -137,13 +145,15 @@ impl Transport for TcpTransport {
                     "SMB TCP connection closed while receiving a frame",
                 )));
             }
-            self.read_buffer.extend_from_slice(&chunk[..read]);
+            self.read_buffer.extend_from_slice(&self.read_chunk[..read]);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of_val;
+
     use super::*;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
@@ -188,6 +198,30 @@ mod tests {
         let recovered = transport.receive_message().await.unwrap();
         assert_eq!(recovered, payload);
         assert!(transport.read_buffer.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn receive_future_does_not_embed_the_network_scratch_buffer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+        });
+
+        let mut transport = TcpTransport::connect(
+            "127.0.0.1",
+            address.port(),
+            TcpTransportConfig::default(),
+        )
+        .await
+        .unwrap();
+        let future = transport.receive_message();
+
+        // Regression guard: the previous 64 KiB async-local array made this future large enough
+        // to overflow a Tokio worker stack in the reconnecting video-broker call chain.
+        assert!(size_of_val(&future) < TCP_READ_CHUNK_SIZE / 2);
+        drop(future);
         server.await.unwrap();
     }
 }
