@@ -119,12 +119,8 @@ where
             let (response_message, header) = loop {
                 let mut response_message = self.connection.transport.receive_message().await?;
                 let header = Smb2Header::decode(&response_message)?;
-                let phase = async_state.validate(
-                    file.tree_id(),
-                    self.session_id,
-                    message_id,
-                    &header,
-                )?;
+                let phase =
+                    async_state.validate(file.tree_id(), self.session_id, message_id, &header)?;
                 self.connection.grant_credits(header.credits)?;
                 self.verify_read_response(&mut response_message, &header)?;
                 if phase == ReadResponsePhase::InterimPending {
@@ -299,10 +295,11 @@ where
                     ));
                 }
 
+                let request_message_id = pending[position].message_id;
                 let phase = pending[position].async_state.validate(
                     file.tree_id(),
                     self.session_id,
-                    pending[position].message_id,
+                    request_message_id,
                     &header,
                 )?;
                 self.connection.grant_credits(header.credits)?;
