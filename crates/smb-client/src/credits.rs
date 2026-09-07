@@ -58,8 +58,9 @@ impl CreditManager {
 
     /// Maximum payload that can currently be covered by consecutive 64 KiB credit units.
     pub fn max_multi_credit_payload(&self) -> usize {
-        let units = self.available.max(1) as usize;
-        units.saturating_mul(65_536)
+        usize::try_from(self.available)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(65_536)
     }
 }
 
@@ -87,5 +88,12 @@ mod tests {
     fn request_hint_grows_toward_target() {
         let credits = CreditManager::new(32).unwrap();
         assert_eq!(credits.request_hint(1), 96);
+    }
+
+    #[test]
+    fn zero_available_credits_cover_no_payload() {
+        let mut credits = CreditManager::new(1).unwrap();
+        credits.reserve(1).unwrap();
+        assert_eq!(credits.max_multi_credit_payload(), 0);
     }
 }
