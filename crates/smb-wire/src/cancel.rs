@@ -35,12 +35,7 @@ impl CancelRequest {
 
     /// Encodes an asynchronous SMB2 CANCEL request for a request that has already returned an
     /// interim async response.
-    pub fn encode_async_message(
-        self,
-        message_id: u64,
-        session_id: u64,
-        async_id: u64,
-    ) -> Vec<u8> {
+    pub fn encode_async_message(self, message_id: u64, session_id: u64, async_id: u64) -> Vec<u8> {
         let mut header = Smb2Header::request(Command::Cancel, message_id, 0, 0);
         header.flags |= flags::ASYNC_COMMAND;
         header.session_id = session_id;
