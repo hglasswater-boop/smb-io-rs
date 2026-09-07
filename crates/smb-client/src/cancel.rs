@@ -86,13 +86,12 @@ where
                     .connection
                     .reserve_credits(credit_charge, options.credit_request)?;
                 let message_id = self.connection.message_ids.allocate(credit_charge)?;
-                let request_offset = offset
-                    .checked_add(
-                        u64::try_from(out.len() + scheduled).map_err(|_| {
+                let request_offset =
+                    offset
+                        .checked_add(u64::try_from(out.len() + scheduled).map_err(|_| {
                             ClientError::Protocol("READ offset conversion overflow")
-                        })?,
-                    )
-                    .ok_or(ClientError::Protocol("READ offset overflow"))?;
+                        })?)
+                        .ok_or(ClientError::Protocol("READ offset overflow"))?;
                 let request = ReadRequest::direct(
                     file.file_id(),
                     request_offset,
@@ -249,7 +248,9 @@ async fn send_cancel_requests<T: Transport>(
 ) -> Result<(), ClientError> {
     for (request, result) in pending.iter().zip(completed) {
         if result.is_none() {
-            session.send_cancel_for_message_id(request.message_id).await?;
+            session
+                .send_cancel_for_message_id(request.message_id)
+                .await?;
         }
     }
     Ok(())
