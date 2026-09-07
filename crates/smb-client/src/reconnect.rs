@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::OnceLock;
 
+use sha2::{Digest, Sha256};
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -9,7 +10,7 @@ use zeroize::Zeroizing;
 use crate::{
     ClientError, CloseOptions, Connection, DurableFileHandle, DurableHandleV2Options, FileHandle,
     FileOpenOptions, NegotiateConfig, ReadCancellationToken, SessionConnection, SessionSetupConfig,
-    TcpTransport, TcpTransportConfig, TreeConnectOptions,
+    TcpTransport, TcpTransportConfig, Transport, TreeConnectOptions,
 };
 
 pub const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
@@ -17,31 +18,76 @@ pub const STATUS_NETWORK_NAME_DELETED: u32 = 0xC000_00C9;
 pub const STATUS_USER_SESSION_DELETED: u32 = 0xC000_0203;
 pub const STATUS_NETWORK_SESSION_EXPIRED: u32 = 0xC000_035C;
 
+const IDENTITY_SAMPLE_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     len: u64,
-    creation_time: u64,
     last_write_time: u64,
+    fingerprint: [u8; 32],
 }
 
 impl FileIdentity {
-    fn from_file(file: &FileHandle) -> Self {
-        Self {
-            len: file.len(),
-            creation_time: file.creation_time(),
-            last_write_time: file.last_write_time(),
-        }
-    }
-
     fn is_compatible_with(self, reopened: Self) -> bool {
         self.len == reopened.len
-            && timestamp_matches(self.creation_time, reopened.creation_time)
             && timestamp_matches(self.last_write_time, reopened.last_write_time)
+            && self.fingerprint == reopened.fingerprint
     }
 }
 
 fn timestamp_matches(original: u64, reopened: u64) -> bool {
     original == 0 || reopened == 0 || original == reopened
+}
+
+async fn capture_file_identity<T>(
+    session: &mut SessionConnection<T>,
+    file: &FileHandle,
+) -> Result<FileIdentity, ClientError>
+where
+    T: Transport,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(b"smb-io-rs:file-identity:v1");
+    hasher.update(file.len().to_le_bytes());
+
+    for offset in identity_sample_offsets(file.len()) {
+        let remaining = file.len() - offset;
+        let sample_len = usize::try_from(remaining.min(IDENTITY_SAMPLE_BYTES as u64))
+            .map_err(|_| ClientError::Protocol("SMB identity sample length overflow"))?;
+        let sample = session.read_at(file, offset, sample_len).await?;
+        if sample.len() != sample_len {
+            return Err(ClientError::Protocol(
+                "SMB identity sample returned an unexpected length",
+            ));
+        }
+        hasher.update(offset.to_le_bytes());
+        hasher.update((sample_len as u64).to_le_bytes());
+        hasher.update(&sample);
+    }
+
+    let digest = hasher.finalize();
+    let mut fingerprint = [0u8; 32];
+    fingerprint.copy_from_slice(&digest);
+
+    Ok(FileIdentity {
+        len: file.len(),
+        last_write_time: file.last_write_time(),
+        fingerprint,
+    })
+}
+
+fn identity_sample_offsets(len: u64) -> Vec<u64> {
+    if len == 0 {
+        return Vec::new();
+    }
+
+    let sample = len.min(IDENTITY_SAMPLE_BYTES as u64);
+    let last_start = len - sample;
+    let middle_start = (len / 2).saturating_sub(sample / 2).min(last_start);
+    let mut offsets = vec![0, middle_start, last_start];
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
 }
 
 #[derive(Default)]
@@ -52,9 +98,12 @@ struct DurableRecoveryState {
 
 /// Reusable recipe for restoring a read-only SMB file after a transport/session failure.
 ///
-/// Path reopen is always guarded by the first CREATE metadata so a different file at the same path
-/// is never silently accepted. Durable Handle V2 can be explicitly enabled for consumers that can
-/// also service the BATCH-oplock lifecycle; when enabled, DH2C is attempted before path reopen.
+/// Path reopen is guarded by stable-enough read-only identity evidence: file length, LastWriteTime
+/// when the server supplies one, and SHA-256 over bounded samples from the beginning, middle and end
+/// of the file. This avoids relying on SMB CreationTime, which is not stable across all Unix/Samba
+/// configurations, while still refusing a path reopen when the underlying file has materially
+/// changed. Durable Handle V2 can be explicitly enabled for consumers that can also service the
+/// BATCH-oplock lifecycle; when enabled, DH2C is attempted before path reopen.
 pub struct ReadOnlyReconnectRecipe {
     host: String,
     port: u16,
@@ -123,8 +172,15 @@ impl ReadOnlyReconnectRecipe {
             .ok_or(ReconnectError::RandomSource)
     }
 
-    fn remember_or_validate_file(&self, file: &FileHandle) -> Result<(), ClientError> {
-        let reopened = FileIdentity::from_file(file);
+    async fn remember_or_validate_file<T>(
+        &self,
+        session: &mut SessionConnection<T>,
+        file: &FileHandle,
+    ) -> Result<(), ClientError>
+    where
+        T: Transport,
+    {
+        let reopened = capture_file_identity(session, file).await?;
 
         if let Some(original) = self.identity.get() {
             return validate_file_identity(*original, reopened);
@@ -255,7 +311,7 @@ pub async fn connect_read_only_file(
             match session.reconnect_file_durable_v2(&tree, &existing).await {
                 Ok(refreshed) => {
                     let file = refreshed.file().clone();
-                    if let Err(error) = recipe.remember_or_validate_file(&file) {
+                    if let Err(error) = recipe.remember_or_validate_file(&mut session, &file).await {
                         durable_state.handle = None;
                         let _ = session
                             .close_file(refreshed.into_file(), CloseOptions::default())
@@ -292,7 +348,7 @@ pub async fn connect_read_only_file(
             {
                 Ok(opened) => {
                     let file = opened.file().clone();
-                    if let Err(error) = recipe.remember_or_validate_file(&file) {
+                    if let Err(error) = recipe.remember_or_validate_file(&mut session, &file).await {
                         let _ = session
                             .close_file(opened.into_file(), CloseOptions::default())
                             .await;
@@ -312,7 +368,9 @@ pub async fn connect_read_only_file(
     let file = session
         .open_file(&tree, &recipe.path, FileOpenOptions::read_existing_random())
         .await?;
-    recipe.remember_or_validate_file(&file)?;
+    recipe
+        .remember_or_validate_file(&mut session, &file)
+        .await?;
 
     Ok((session, file))
 }
@@ -340,6 +398,9 @@ mod tests {
     use std::io;
 
     use super::*;
+
+    const FINGERPRINT_A: [u8; 32] = [0x11; 32];
+    const FINGERPRINT_B: [u8; 32] = [0x22; 32];
 
     fn recipe() -> ReadOnlyReconnectRecipe {
         ReadOnlyReconnectRecipe::new(
@@ -396,8 +457,8 @@ mod tests {
     fn reconnect_identity_accepts_the_same_static_file() {
         let original = FileIdentity {
             len: 4_500_000_000,
-            creation_time: 100,
             last_write_time: 200,
+            fingerprint: FINGERPRINT_A,
         };
         assert!(original.is_compatible_with(original));
     }
@@ -406,35 +467,49 @@ mod tests {
     fn reconnect_identity_rejects_replacement_or_mutation() {
         let original = FileIdentity {
             len: 1_000,
-            creation_time: 100,
             last_write_time: 200,
+            fingerprint: FINGERPRINT_A,
         };
         assert!(!original.is_compatible_with(FileIdentity {
             len: 999,
             ..original
         }));
         assert!(!original.is_compatible_with(FileIdentity {
-            creation_time: 101,
+            last_write_time: 201,
             ..original
         }));
         assert!(!original.is_compatible_with(FileIdentity {
-            last_write_time: 201,
+            fingerprint: FINGERPRINT_B,
             ..original
         }));
     }
 
     #[test]
-    fn reconnect_identity_treats_zero_timestamps_as_unknown() {
+    fn reconnect_identity_treats_zero_last_write_time_as_unknown() {
         let original = FileIdentity {
             len: 1_000,
-            creation_time: 0,
-            last_write_time: 200,
+            last_write_time: 0,
+            fingerprint: FINGERPRINT_A,
         };
         let reopened = FileIdentity {
             len: 1_000,
-            creation_time: 123,
-            last_write_time: 0,
+            last_write_time: 123,
+            fingerprint: FINGERPRINT_A,
         };
         assert!(original.is_compatible_with(reopened));
+    }
+
+    #[test]
+    fn identity_sampling_covers_beginning_middle_and_end_without_duplicates() {
+        assert!(identity_sample_offsets(0).is_empty());
+        assert_eq!(identity_sample_offsets(100), vec![0]);
+
+        let len = 10 * IDENTITY_SAMPLE_BYTES as u64;
+        let offsets = identity_sample_offsets(len);
+        assert_eq!(offsets.len(), 3);
+        assert_eq!(offsets[0], 0);
+        assert_eq!(offsets[2], len - IDENTITY_SAMPLE_BYTES as u64);
+        assert!(offsets[1] > offsets[0]);
+        assert!(offsets[1] < offsets[2]);
     }
 }
