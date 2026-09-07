@@ -23,18 +23,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "verify" => {
             let request = VerifyRequest {
                 host: args.next().ok_or_else(verify_usage)?,
-                port: args
-                    .next()
-                    .ok_or_else(verify_usage)?
-                    .parse::<u16>()?,
+                port: args.next().ok_or_else(verify_usage)?.parse::<u16>()?,
                 share: args.next().ok_or_else(verify_usage)?,
                 path: args.next().ok_or_else(verify_usage)?,
                 username: dash_to_empty(args.next().ok_or_else(verify_usage)?),
                 password: dash_to_empty(args.next().ok_or_else(verify_usage)?),
-                offset: args
-                    .next()
-                    .ok_or_else(verify_usage)?
-                    .parse::<u64>()?,
+                offset: args.next().ok_or_else(verify_usage)?.parse::<u64>()?,
                 expected: parse_hex(&args.next().ok_or_else(verify_usage)?)?,
             };
             ensure_no_more_with(args, verify_usage())?;
@@ -96,7 +90,11 @@ async fn run_verify(request: VerifyRequest) -> Result<(), Box<dyn Error>> {
         .tree_connect(unc, TreeConnectOptions::default())
         .await?;
     let file = session
-        .open_file(&tree, &request.path, FileOpenOptions::read_existing_random())
+        .open_file(
+            &tree,
+            &request.path,
+            FileOpenOptions::read_existing_random(),
+        )
         .await?;
 
     let expected_end = request
@@ -177,10 +175,7 @@ async fn negotiated_connection(
     let peer = transport.peer_addr()?;
     let mut connection = Connection::new(transport);
     connection
-        .negotiate(&NegotiateConfig::modern(
-            client_guid,
-            preauth_salt.to_vec(),
-        ))
+        .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
         .await?;
     Ok((connection, peer))
 }
@@ -212,7 +207,11 @@ fn parse_port(value: Option<String>) -> Result<u16, Box<dyn Error>> {
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" { String::new() } else { value }
+    if value == "-" {
+        String::new()
+    } else {
+        value
+    }
 }
 
 fn ensure_no_more(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
