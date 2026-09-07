@@ -16,6 +16,7 @@ mod message_id;
 mod negotiate;
 mod preauth;
 mod read;
+mod read_async;
 mod session;
 mod signing;
 mod transport;
@@ -31,6 +32,7 @@ pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
 pub use read::{PipelinedReadOptions, ReadOptions, STATUS_END_OF_FILE};
+pub use read_async::STATUS_PENDING;
 pub use session::{
     STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
 };
