@@ -284,10 +284,12 @@ pub fn video_broker<T>(
 where
     T: Transport,
 {
-    validate_broker_config(config)?;
+    validate_queue_capacity(config.queue_capacity)?;
+    let reader = VideoReader::new(config.reader)?;
     Ok(broker_from_source(
         BrokerSource::Direct { session, file },
-        config,
+        reader,
+        config.queue_capacity,
     ))
 }
 
@@ -297,18 +299,20 @@ pub async fn recovering_video_broker(
     recipe: ReadOnlyReconnectRecipe,
     config: VideoBrokerConfig,
 ) -> Result<(VideoBrokerHandle, VideoBrokerRunner<TcpTransport>), BrokerError> {
-    validate_broker_config(config)?;
+    validate_queue_capacity(config.queue_capacity)?;
+    let reader = VideoReader::new(config.reader)?;
     let source = RecoveringReadOnlyFile::connect(recipe)
         .await
         .map_err(StreamError::from)?;
     Ok(broker_from_source::<TcpTransport>(
         BrokerSource::Recovering(source),
-        config,
+        reader,
+        config.queue_capacity,
     ))
 }
 
-fn validate_broker_config(config: VideoBrokerConfig) -> Result<(), BrokerError> {
-    if config.queue_capacity == 0 {
+fn validate_queue_capacity(queue_capacity: usize) -> Result<(), BrokerError> {
+    if queue_capacity == 0 {
         return Err(BrokerError::InvalidConfig(
             "queue_capacity must be greater than zero",
         ));
@@ -318,12 +322,11 @@ fn validate_broker_config(config: VideoBrokerConfig) -> Result<(), BrokerError> 
 
 fn broker_from_source<T>(
     source: BrokerSource<T>,
-    config: VideoBrokerConfig,
+    reader: VideoReader,
+    queue_capacity: usize,
 ) -> (VideoBrokerHandle, VideoBrokerRunner<T>) {
-    let reader = VideoReader::new(config.reader)
-        .expect("validated VideoReaderConfig must construct a VideoReader");
     let cancellation = ReadCancellationToken::new();
-    let (commands_tx, commands_rx) = mpsc::channel(config.queue_capacity);
+    let (commands_tx, commands_rx) = mpsc::channel(queue_capacity);
     let handle = VideoBrokerHandle {
         cancellation: cancellation.clone(),
         commands: commands_tx,
@@ -355,12 +358,8 @@ mod tests {
 
     #[test]
     fn zero_queue_capacity_is_invalid_by_contract() {
-        let config = VideoBrokerConfig {
-            queue_capacity: 0,
-            ..VideoBrokerConfig::default()
-        };
         assert!(matches!(
-            validate_broker_config(config),
+            validate_queue_capacity(0),
             Err(BrokerError::InvalidConfig(_))
         ));
     }
