@@ -7,9 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+smb-io-auth = { path = "../smb-auth" }
 smb-io-client = { path = "../smb-client" }
 smb-io-fs = { path = "../smb-fs" }
 smb-io-stream = { path = "../smb-stream" }
+getrandom = "0.3"
+tokio = { version = "1.40", features = ["rt-multi-thread", "time", "net"] }
 
 [lints.clippy]
 all = "warn"
