@@ -146,6 +146,7 @@ where
         };
         let reconnect_context = reconnect.into_context()?;
         let mut reconnect_options = durable.open_options;
+        reconnect_options.requested_oplock_level = durable.file.oplock_level();
         reconnect_options.impersonation_level = 0;
 
         let result = self
