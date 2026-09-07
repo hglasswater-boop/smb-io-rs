@@ -1,3 +1,4 @@
+use std::io::{self, ErrorKind};
 use std::time::Duration;
 
 use smb_io_wire::{
@@ -10,10 +11,17 @@ use tokio::time::timeout;
 
 use crate::ClientError;
 
+const TCP_READ_CHUNK_SIZE: usize = 64 * 1024;
+
 /// Message-oriented transport used by the SMB state machine.
 ///
 /// Payloads passed through this trait start at the SMB protocol identifier. The transport owns
 /// direct-TCP framing so higher layers never mix packet offsets with the 4-byte TCP prefix.
+///
+/// `receive_message` implementations must be cancellation-safe: if its future is dropped while
+/// awaiting data, a later call must resume from the same byte position without losing a partial
+/// frame. The client relies on this contract to interrupt a blocked READ wait long enough to send
+/// SMB2 CANCEL on the same full-duplex connection.
 #[allow(async_fn_in_trait)]
 pub trait Transport: Send {
     async fn send_message(&mut self, message: &[u8]) -> Result<(), ClientError>;
@@ -43,6 +51,7 @@ pub struct TcpTransport {
     stream: TcpStream,
     io_timeout: Duration,
     max_message_size: usize,
+    read_buffer: Vec<u8>,
 }
 
 impl TcpTransport {
@@ -64,11 +73,37 @@ impl TcpTransport {
             stream,
             io_timeout: config.io_timeout,
             max_message_size: config.max_message_size,
+            read_buffer: Vec::with_capacity(TCP_READ_CHUNK_SIZE),
         })
     }
 
     pub fn peer_addr(&self) -> Result<std::net::SocketAddr, ClientError> {
         Ok(self.stream.peer_addr()?)
+    }
+
+    fn try_take_message(&mut self) -> Result<Option<Vec<u8>>, ClientError> {
+        if self.read_buffer.len() < DIRECT_TCP_HEADER_SIZE {
+            return Ok(None);
+        }
+        let payload_len = decode_direct_tcp_length(&self.read_buffer[..DIRECT_TCP_HEADER_SIZE])?;
+        if payload_len > self.max_message_size {
+            return Err(ClientError::Protocol(
+                "SMB peer advertised a frame larger than configured transport maximum",
+            ));
+        }
+        let frame_len = DIRECT_TCP_HEADER_SIZE
+            .checked_add(payload_len)
+            .ok_or(ClientError::Protocol("direct-TCP frame length overflow"))?;
+        if self.read_buffer.len() < frame_len {
+            return Ok(None);
+        }
+
+        let mut frame = std::mem::take(&mut self.read_buffer);
+        let remainder = frame.split_off(frame_len);
+        self.read_buffer = remainder;
+        frame.copy_within(DIRECT_TCP_HEADER_SIZE..frame_len, 0);
+        frame.truncate(payload_len);
+        Ok(Some(frame))
     }
 }
 
@@ -87,20 +122,22 @@ impl Transport for TcpTransport {
     }
 
     async fn receive_message(&mut self) -> Result<Vec<u8>, ClientError> {
-        let mut header = [0u8; DIRECT_TCP_HEADER_SIZE];
-        timeout(self.io_timeout, self.stream.read_exact(&mut header))
-            .await
-            .map_err(|_| ClientError::Timeout("TCP frame header read"))??;
-        let len = decode_direct_tcp_length(&header)?;
-        if len > self.max_message_size {
-            return Err(ClientError::Protocol(
-                "SMB peer advertised a frame larger than configured transport maximum",
-            ));
+        loop {
+            if let Some(message) = self.try_take_message()? {
+                return Ok(message);
+            }
+
+            let mut chunk = [0u8; TCP_READ_CHUNK_SIZE];
+            let read = timeout(self.io_timeout, self.stream.read(&mut chunk))
+                .await
+                .map_err(|_| ClientError::Timeout("TCP message read"))??;
+            if read == 0 {
+                return Err(ClientError::Io(io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "SMB TCP connection closed while receiving a frame",
+                )));
+            }
+            self.read_buffer.extend_from_slice(&chunk[..read]);
         }
-        let mut message = vec![0u8; len];
-        timeout(self.io_timeout, self.stream.read_exact(&mut message))
-            .await
-            .map_err(|_| ClientError::Timeout("TCP message read"))??;
-        Ok(message)
     }
 }
