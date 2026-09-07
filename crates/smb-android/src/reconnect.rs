@@ -100,12 +100,8 @@ pub(crate) async fn connect_video(
     getrandom::fill(&mut client_guid).map_err(|_| ReconnectError::RandomSource)?;
     getrandom::fill(&mut preauth_salt).map_err(|_| ReconnectError::RandomSource)?;
 
-    let transport = TcpTransport::connect(
-        &recipe.host,
-        recipe.port,
-        TcpTransportConfig::default(),
-    )
-    .await?;
+    let transport =
+        TcpTransport::connect(&recipe.host, recipe.port, TcpTransportConfig::default()).await?;
     let mut connection = Connection::new(transport);
     connection
         .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
@@ -138,11 +134,7 @@ pub(crate) async fn connect_video(
         .tree_connect(unc_share, TreeConnectOptions::default())
         .await?;
     let file = session
-        .open_file(
-            &tree,
-            &recipe.path,
-            FileOpenOptions::read_existing_random(),
-        )
+        .open_file(&tree, &recipe.path, FileOpenOptions::read_existing_random())
         .await?;
     Ok((session, file))
 }
@@ -179,7 +171,9 @@ mod tests {
 
     #[test]
     fn security_and_protocol_failures_are_never_retried() {
-        assert!(!is_retryable_client_error(&ClientError::Protocol("bad frame")));
+        assert!(!is_retryable_client_error(&ClientError::Protocol(
+            "bad frame"
+        )));
         assert!(!is_retryable_client_error(&ClientError::Cancelled));
         assert!(!is_retryable_client_error(&ClientError::ServerStatus(
             0xC000_0022,
