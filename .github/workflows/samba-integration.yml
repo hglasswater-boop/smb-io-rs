@@ -108,6 +108,18 @@ jobs:
           grep -q '^signing_required: true$' /tmp/auth-small.log
           grep -q '^verified: true$' /tmp/auth-small.log
 
+      - name: Verify signed Durable Handle V2 grant
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe --example durable_grant -- \
+            127.0.0.1 "$SMB_PORT" auth small.bin \
+            "$SMB_USER" "$SMB_PASSWORD" \
+            | tee /tmp/auth-durable.log
+          grep -q '^mechanism: NtlmV2$' /tmp/auth-durable.log
+          grep -q '^signing_required: true$' /tmp/auth-durable.log
+          grep -q '^durable_persistent: false$' /tmp/auth-durable.log
+          grep -q '^durable_granted: true$' /tmp/auth-durable.log
+
       - name: Verify signed NTLMv2 read beyond 4 GiB
         run: |
           set -o pipefail
@@ -355,6 +367,7 @@ jobs:
         run: |
           sudo cat /tmp/xfiles-smb-signed.log 2>/dev/null || true
           sudo cat /tmp/xfiles-smb-guest.log 2>/dev/null || true
+          cat /tmp/auth-durable.log 2>/dev/null || true
           cat /tmp/auth-reconnect.log 2>/dev/null || true
           cat /tmp/guest-reconnect.log 2>/dev/null || true
           cat /tmp/identity-reconnect.log 2>/dev/null || true
