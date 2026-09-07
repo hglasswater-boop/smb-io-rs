@@ -40,7 +40,11 @@ impl DurableHandleRequestV2 {
     }
 
     pub fn decode_data(input: &[u8]) -> Result<Self, WireError> {
-        require_exact_len(input, DURABLE_HANDLE_REQUEST_V2_DATA_SIZE, "DH2Q request length")?;
+        require_exact_len(
+            input,
+            DURABLE_HANDLE_REQUEST_V2_DATA_SIZE,
+            "DH2Q request length",
+        )?;
         if input[8..16].iter().any(|byte| *byte != 0) {
             return Err(WireError::InvalidField("DH2Q Reserved"));
         }
@@ -56,11 +60,18 @@ impl DurableHandleRequestV2 {
     }
 
     pub fn into_context(self) -> Result<CreateContext, WireError> {
-        CreateContext::new(DURABLE_HANDLE_REQUEST_V2_NAME.to_vec(), self.encode_data()?.to_vec())
+        CreateContext::new(
+            DURABLE_HANDLE_REQUEST_V2_NAME.to_vec(),
+            self.encode_data()?.to_vec(),
+        )
     }
 
     pub fn from_context(context: &CreateContext) -> Result<Self, WireError> {
-        require_name(context, &DURABLE_HANDLE_REQUEST_V2_NAME, "DH2Q context name")?;
+        require_name(
+            context,
+            &DURABLE_HANDLE_REQUEST_V2_NAME,
+            "DH2Q context name",
+        )?;
         Self::decode_data(&context.data)
     }
 }
@@ -147,7 +158,11 @@ impl DurableHandleResponseV2 {
     }
 
     pub fn from_context(context: &CreateContext) -> Result<Self, WireError> {
-        require_name(context, &DURABLE_HANDLE_REQUEST_V2_NAME, "DH2Q context name")?;
+        require_name(
+            context,
+            &DURABLE_HANDLE_REQUEST_V2_NAME,
+            "DH2Q context name",
+        )?;
         Self::decode_data(&context.data)
     }
 }
@@ -171,11 +186,7 @@ fn require_name(
     }
 }
 
-fn require_exact_len(
-    input: &[u8],
-    expected: usize,
-    field: &'static str,
-) -> Result<(), WireError> {
+fn require_exact_len(input: &[u8], expected: usize, field: &'static str) -> Result<(), WireError> {
     require_len(input, expected)?;
     if input.len() != expected {
         return Err(WireError::InvalidField(field));
@@ -196,10 +207,16 @@ mod tests {
         };
         let encoded = request.encode_data().unwrap();
         assert_eq!(&encoded[8..16], &[0; 8]);
-        assert_eq!(DurableHandleRequestV2::decode_data(&encoded).unwrap(), request);
+        assert_eq!(
+            DurableHandleRequestV2::decode_data(&encoded).unwrap(),
+            request
+        );
         let context = request.into_context().unwrap();
         assert_eq!(context.name, b"DH2Q");
-        assert_eq!(DurableHandleRequestV2::from_context(&context).unwrap(), request);
+        assert_eq!(
+            DurableHandleRequestV2::from_context(&context).unwrap(),
+            request
+        );
     }
 
     #[test]
@@ -211,7 +228,10 @@ mod tests {
         };
         let encoded = reconnect.encode_data().unwrap();
         assert_eq!(encoded.len(), 36);
-        assert_eq!(DurableHandleReconnectV2::decode_data(&encoded).unwrap(), reconnect);
+        assert_eq!(
+            DurableHandleReconnectV2::decode_data(&encoded).unwrap(),
+            reconnect
+        );
         assert_eq!(
             DurableHandleReconnectV2::from_context(&reconnect.into_context().unwrap()).unwrap(),
             reconnect
