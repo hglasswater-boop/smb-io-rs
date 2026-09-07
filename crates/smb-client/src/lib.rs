@@ -17,6 +17,7 @@ mod negotiate;
 mod preauth;
 mod read;
 mod read_async;
+mod reconnect;
 mod session;
 mod signing;
 mod transport;
@@ -33,6 +34,11 @@ pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
 pub use read::{PipelinedReadOptions, ReadOptions, STATUS_END_OF_FILE};
 pub use read_async::STATUS_PENDING;
+pub use reconnect::{
+    ReadOnlyReconnectRecipe, ReconnectError, STATUS_NETWORK_NAME_DELETED,
+    STATUS_NETWORK_SESSION_EXPIRED, STATUS_USER_SESSION_DELETED, connect_read_only_file,
+    connect_read_only_file_cancelable, is_retryable_client_error,
+};
 pub use session::{
     STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
 };
