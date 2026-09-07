@@ -44,6 +44,7 @@ pub struct FileHandle {
     file_id: FileId,
     tree_id: u32,
     path: String,
+    oplock_level: u8,
     allocation_size: u64,
     end_of_file: u64,
     file_attributes: u32,
@@ -65,6 +66,11 @@ impl FileHandle {
 
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Oplock level actually granted by the server in the successful CREATE response.
+    pub fn oplock_level(&self) -> u8 {
+        self.oplock_level
     }
 
     pub fn len(&self) -> u64 {
@@ -240,6 +246,7 @@ where
                 file_id: response.file_id,
                 tree_id: tree.tree_id(),
                 path,
+                oplock_level: response.oplock_level,
                 allocation_size: response.allocation_size,
                 end_of_file: response.end_of_file,
                 file_attributes: response.file_attributes,
