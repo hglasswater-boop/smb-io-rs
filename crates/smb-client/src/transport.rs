@@ -141,3 +141,53 @@ impl Transport for TcpTransport {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn cancelled_receive_preserves_partial_direct_tcp_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let payload = vec![0xFE, b'S', b'M', b'B', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let frame = encode_direct_tcp_frame(&payload).unwrap();
+        let split_at = 9;
+        let first_half = frame[..split_at].to_vec();
+        let second_half = frame[split_at..].to_vec();
+        let (first_sent_tx, first_sent_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&first_half).await.unwrap();
+            first_sent_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            socket.write_all(&second_half).await.unwrap();
+        });
+
+        let mut transport = TcpTransport::connect(
+            "127.0.0.1",
+            address.port(),
+            TcpTransportConfig {
+                io_timeout: Duration::from_secs(2),
+                ..TcpTransportConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        first_sent_rx.await.unwrap();
+        let interrupted = timeout(Duration::from_millis(100), transport.receive_message()).await;
+        assert!(interrupted.is_err());
+        assert_eq!(transport.read_buffer.len(), split_at);
+
+        release_tx.send(()).unwrap();
+        let recovered = transport.receive_message().await.unwrap();
+        assert_eq!(recovered, payload);
+        assert!(transport.read_buffer.is_empty());
+        server.await.unwrap();
+    }
+}
