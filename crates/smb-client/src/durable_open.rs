@@ -5,22 +5,13 @@ use smb_io_wire::{
 
 use crate::{ClientError, FileHandle, FileOpenOptions, SessionConnection, Transport, TreeHandle};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DurableHandleV2Options {
     /// Requested durable timeout in milliseconds. Zero lets the server choose its default.
     pub timeout_ms: u32,
     /// Requests a persistent handle. This requires both server support and a continuously
     /// available share; ordinary media shares should normally leave this false.
     pub persistent: bool,
-}
-
-impl Default for DurableHandleV2Options {
-    fn default() -> Self {
-        Self {
-            timeout_ms: 0,
-            persistent: false,
-        }
-    }
 }
 
 /// A file open for which the server granted SMB2 Durable Handle V2 state.
