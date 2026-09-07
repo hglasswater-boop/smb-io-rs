@@ -1,4 +1,6 @@
-use smb_io_wire::{CancelRequest, ReadRequest, ReadResponse, Smb2Header, StatusField, flags, session_flags};
+use smb_io_wire::{
+    CancelRequest, ReadRequest, ReadResponse, Smb2Header, StatusField, flags, session_flags,
+};
 
 use crate::read_async::{AsyncReadState, ReadResponsePhase};
 use crate::{
@@ -174,10 +176,11 @@ where
                     ));
                 }
 
+                let request_message_id = pending[position].message_id;
                 let phase = pending[position].async_state.validate(
                     file.tree_id(),
                     self.session_id,
-                    pending[position].message_id,
+                    request_message_id,
                     &header,
                 )?;
                 self.connection.grant_credits(header.credits)?;
@@ -185,17 +188,11 @@ where
 
                 if phase == ReadResponsePhase::InterimPending {
                     if cancelled && !pending[position].async_cancel_sent {
-                        let async_id = pending[position]
-                            .async_state
-                            .async_id()
-                            .ok_or(ClientError::Protocol(
-                                "STATUS_PENDING READ did not record an AsyncId",
-                            ))?;
-                        self.send_cancel_for_message_id(
-                            pending[position].message_id,
-                            Some(async_id),
-                        )
-                        .await?;
+                        let async_id = pending[position].async_state.async_id().ok_or(
+                            ClientError::Protocol("STATUS_PENDING READ did not record an AsyncId"),
+                        )?;
+                        self.send_cancel_for_message_id(request_message_id, Some(async_id))
+                            .await?;
                         pending[position].async_cancel_sent = true;
                     }
                     continue;
