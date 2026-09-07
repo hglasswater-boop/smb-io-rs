@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use smb_io_auth::{NtlmCredentials, NtlmV2Provider};
+use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
     ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig,
     ReadCancellationToken, SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig,
@@ -32,7 +32,8 @@ impl Default for AndroidEngineConfig {
 ///
 /// This type intentionally does not implement `Debug` or `Clone`: it contains a plaintext password
 /// only long enough to construct the core `NtlmCredentials`, which immediately takes ownership of
-/// it and zeroizes the password allocation on drop.
+/// it and zeroizes the password allocation on drop for authenticated sessions. Anonymous sessions
+/// ignore the password field and XFiles passes it as empty.
 pub struct VideoOpenRequest {
     pub host: String,
     pub port: u16,
@@ -266,17 +267,24 @@ impl AndroidEngine {
                 .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
                 .await?;
 
-            let mut credentials = NtlmCredentials::new(username, password);
-            if !domain.is_empty() {
-                credentials = credentials.with_domain(domain);
-            }
-            if !workstation.is_empty() {
-                credentials = credentials.with_workstation(workstation);
-            }
-            let mut auth = NtlmV2Provider::new(credentials);
-            let mut session = connection
-                .session_setup(&mut auth, SessionSetupConfig::default())
-                .await?;
+            let mut session = if username.is_empty() {
+                let mut auth = AnonymousNtlmProvider::new();
+                connection
+                    .session_setup(&mut auth, SessionSetupConfig::default())
+                    .await?
+            } else {
+                let mut credentials = NtlmCredentials::new(username, password);
+                if !domain.is_empty() {
+                    credentials = credentials.with_domain(domain);
+                }
+                if !workstation.is_empty() {
+                    credentials = credentials.with_workstation(workstation);
+                }
+                let mut auth = NtlmV2Provider::new(credentials);
+                connection
+                    .session_setup(&mut auth, SessionSetupConfig::default())
+                    .await?
+            };
             let tree = session
                 .tree_connect(unc_share, TreeConnectOptions::default())
                 .await?;
@@ -382,11 +390,6 @@ fn validate_open_request(request: &VideoOpenRequest) -> Result<(), AndroidBridge
     if request.path.is_empty() {
         return Err(AndroidBridgeError::InvalidConfig("path must not be empty"));
     }
-    if request.username.is_empty() {
-        return Err(AndroidBridgeError::InvalidConfig(
-            "username must not be empty for NTLMv2 authentication",
-        ));
-    }
     Ok(())
 }
 
@@ -445,5 +448,17 @@ mod tests {
             "password",
         );
         assert!(validate_open_request(&request).is_err());
+    }
+
+    #[test]
+    fn open_request_validation_accepts_blank_username_for_anonymous() {
+        let request = VideoOpenRequest::new(
+            "nas.local",
+            "video",
+            "movies/sample.mkv",
+            "",
+            "",
+        );
+        assert!(validate_open_request(&request).is_ok());
     }
 }
