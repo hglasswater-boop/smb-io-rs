@@ -8,6 +8,7 @@
 
 mod cancel;
 mod cancellation;
+mod close;
 mod credits;
 mod error;
 mod file;
@@ -22,6 +23,7 @@ mod tree;
 
 pub use cancel::STATUS_CANCELLED;
 pub use cancellation::ReadCancellationToken;
+pub use close::{CloseInfo, CloseOptions};
 pub use credits::CreditManager;
 pub use error::ClientError;
 pub use file::{FileHandle, FileOpenOptions};
