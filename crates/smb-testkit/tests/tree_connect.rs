@@ -9,8 +9,10 @@ use smb_io_wire::{
     create_action, flags, security_mode, share_flags, share_type,
 };
 
+const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
+const PIPELINE_CHUNK: usize = 256 * KIB;
 
 struct StaticAuth {
     key: Option<SecretBytes>,
@@ -142,9 +144,15 @@ fn signed_create_response(session_id: u64, tree_id: u32, signing: &SigningState)
     message
 }
 
-fn signed_read_response(session_id: u64, tree_id: u32, signing: &SigningState) -> Vec<u8> {
-    let data = vec![0xA7; MIB];
-    let mut header = Smb2Header::request(Command::Read, 4, 16, 32);
+fn signed_read_response(
+    session_id: u64,
+    tree_id: u32,
+    message_id: u64,
+    fill: u8,
+    signing: &SigningState,
+) -> Vec<u8> {
+    let data = vec![fill; PIPELINE_CHUNK];
+    let mut header = Smb2Header::request(Command::Read, message_id, 4, 4);
     header.flags = flags::SERVER_TO_REDIR;
     header.status = StatusField::Status(0);
     header.session_id = session_id;
@@ -156,7 +164,7 @@ fn signed_read_response(session_id: u64, tree_id: u32, signing: &SigningState) -
     let mut body = vec![0u8; 16];
     put_u16(&mut body, 0, 17);
     body[2] = 0x50;
-    put_u32(&mut body, 4, MIB as u32);
+    put_u32(&mut body, 4, PIPELINE_CHUNK as u32);
     put_u32(&mut body, 8, 0);
     put_u32(&mut body, 12, 0);
     message.extend_from_slice(&body);
@@ -166,7 +174,7 @@ fn signed_read_response(session_id: u64, tree_id: u32, signing: &SigningState) -
 }
 
 #[tokio::test]
-async fn authenticated_session_reads_one_mib_above_four_gib_with_signing() {
+async fn authenticated_session_pipelines_out_of_order_reads_above_four_gib() {
     let session_key = [0xA5; 16];
     let session_id = 0x1122_3344_5566_7788;
     let tree_id = 0x42;
@@ -179,12 +187,16 @@ async fn authenticated_session_reads_one_mib_above_four_gib_with_signing() {
     )
     .unwrap();
 
+    // The four READ responses deliberately arrive out of request order: 3rd, 1st, 4th, 2nd.
     let transport = ScriptedTransport::new([
         negotiate_302_response(),
         signed_session_response(session_id, &signing),
         signed_tree_response(session_id, tree_id, &signing),
         signed_create_response(session_id, tree_id, &signing),
-        signed_read_response(session_id, tree_id, &signing),
+        signed_read_response(session_id, tree_id, 12, 0xA2, &signing),
+        signed_read_response(session_id, tree_id, 4, 0xA0, &signing),
+        signed_read_response(session_id, tree_id, 16, 0xA3, &signing),
+        signed_read_response(session_id, tree_id, 8, 0xA1, &signing),
     ]);
     let mut connection = Connection::new(transport);
     let config = NegotiateConfig {
@@ -231,12 +243,19 @@ async fn authenticated_session_reads_one_mib_above_four_gib_with_signing() {
     assert_eq!(file.file_id().persistent, 0x1111_2222_3333_4444);
     assert_eq!(file.file_id().volatile, 0x5555_6666_7777_8888);
 
-    let data = session.read_at(&file, read_offset, MIB).await.unwrap();
+    let data = session
+        .read_at_pipelined(&file, read_offset, MIB)
+        .await
+        .unwrap();
     assert_eq!(data.len(), MIB);
-    assert!(data.iter().all(|byte| *byte == 0xA7));
+    for (index, expected) in [0xA0, 0xA1, 0xA2, 0xA3].into_iter().enumerate() {
+        let start = index * PIPELINE_CHUNK;
+        let end = start + PIPELINE_CHUNK;
+        assert!(data[start..end].iter().all(|byte| *byte == expected));
+    }
 
     let transport = session.into_connection().into_transport();
-    assert_eq!(transport.sent_messages().len(), 5);
+    assert_eq!(transport.sent_messages().len(), 8);
 
     let tree_request_message = &transport.sent_messages()[2];
     let tree_header = Smb2Header::decode(tree_request_message).unwrap();
@@ -253,30 +272,32 @@ async fn authenticated_session_reads_one_mib_above_four_gib_with_signing() {
     assert_eq!(create_header.session_id, session_id);
     assert_ne!(create_header.flags & flags::SIGNED, 0);
 
-    let read_request = &transport.sent_messages()[4];
-    let read_header = Smb2Header::decode(read_request).unwrap();
-    assert_eq!(read_header.command, Command::Read);
-    assert_eq!(read_header.message_id, 4);
-    assert_eq!(read_header.credit_charge, 16);
-    assert_eq!(read_header.session_id, session_id);
-    assert_ne!(read_header.flags & flags::SIGNED, 0);
+    for (index, expected_message_id) in [4u64, 8, 12, 16].into_iter().enumerate() {
+        let read_request = &transport.sent_messages()[4 + index];
+        let read_header = Smb2Header::decode(read_request).unwrap();
+        assert_eq!(read_header.command, Command::Read);
+        assert_eq!(read_header.message_id, expected_message_id);
+        assert_eq!(read_header.credit_charge, 4);
+        assert_eq!(read_header.session_id, session_id);
+        assert_ne!(read_header.flags & flags::SIGNED, 0);
 
-    let body = &read_request[64..];
-    assert_eq!(body[2], 0x50);
-    assert_eq!(
-        u32::from_le_bytes(body[4..8].try_into().unwrap()),
-        MIB as u32
-    );
-    assert_eq!(
-        u64::from_le_bytes(body[8..16].try_into().unwrap()),
-        read_offset
-    );
-    assert_eq!(
-        u64::from_le_bytes(body[16..24].try_into().unwrap()),
-        0x1111_2222_3333_4444
-    );
-    assert_eq!(
-        u64::from_le_bytes(body[24..32].try_into().unwrap()),
-        0x5555_6666_7777_8888
-    );
+        let body = &read_request[64..];
+        assert_eq!(body[2], 0x50);
+        assert_eq!(
+            u32::from_le_bytes(body[4..8].try_into().unwrap()),
+            PIPELINE_CHUNK as u32
+        );
+        assert_eq!(
+            u64::from_le_bytes(body[8..16].try_into().unwrap()),
+            read_offset + (index * PIPELINE_CHUNK) as u64
+        );
+        assert_eq!(
+            u64::from_le_bytes(body[16..24].try_into().unwrap()),
+            0x1111_2222_3333_4444
+        );
+        assert_eq!(
+            u64::from_le_bytes(body[24..32].try_into().unwrap()),
+            0x5555_6666_7777_8888
+        );
+    }
 }
