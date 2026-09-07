@@ -6,6 +6,7 @@
 //! and validation only. It must not depend on sockets, credentials, reconnect
 //! policy, platform bindings, or application caching.
 
+mod create;
 mod error;
 mod frame;
 mod header;
@@ -13,6 +14,12 @@ mod negotiate;
 mod session_setup;
 mod tree_connect;
 
+pub use create::{
+    CREATE_REQUEST_FIXED_SIZE, CREATE_REQUEST_STRUCTURE_SIZE, CREATE_RESPONSE_FIXED_SIZE,
+    CREATE_RESPONSE_STRUCTURE_SIZE, CreateRequest, CreateResponse, FileId, create_action,
+    create_disposition, create_options, desired_access, impersonation_level, oplock_level,
+    share_access,
+};
 pub use error::WireError;
 pub use frame::{
     DIRECT_TCP_HEADER_SIZE, DIRECT_TCP_MAX_PAYLOAD, decode_direct_tcp_frame,
