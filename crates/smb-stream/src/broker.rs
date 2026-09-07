@@ -140,7 +140,7 @@ enum BrokerSource<T> {
         session: SessionConnection<T>,
         file: FileHandle,
     },
-    Recovering(RecoveringReadOnlyFile),
+    Recovering(Box<RecoveringReadOnlyFile>),
 }
 
 /// Owns the SMB read source and video read-ahead/cache state.
@@ -217,7 +217,7 @@ where
             BrokerSource::Recovering(source) => {
                 self.reader
                     .read_recovering_cancelable(
-                        source,
+                        source.as_mut(),
                         offset,
                         length,
                         &self.cancellation,
@@ -305,7 +305,7 @@ pub async fn recovering_video_broker(
         .await
         .map_err(StreamError::from)?;
     Ok(broker_from_source::<TcpTransport>(
-        BrokerSource::Recovering(source),
+        BrokerSource::Recovering(Box::new(source)),
         reader,
         config.queue_capacity,
     ))
