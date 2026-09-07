@@ -36,13 +36,13 @@ impl Default for SessionSetupConfig {
 }
 
 pub struct SessionConnection<T> {
-    connection: Connection<T>,
-    session_id: u64,
-    session_flags: u16,
-    mechanism: AuthMechanism,
+    pub(crate) connection: Connection<T>,
+    pub(crate) session_id: u64,
+    pub(crate) session_flags: u16,
+    pub(crate) mechanism: AuthMechanism,
     session_key: Option<SecretBytes>,
-    signing: Option<SigningState>,
-    signing_required: bool,
+    pub(crate) signing: Option<SigningState>,
+    pub(crate) signing_required: bool,
 }
 
 impl<T> SessionConnection<T>
@@ -228,7 +228,8 @@ where
             ))?;
             let is_guest_or_null =
                 response.session_flags & (session_flags::IS_GUEST | session_flags::IS_NULL) != 0;
-            let signing_required = negotiated.require_signing && !is_guest_or_null;
+            let is_encrypted = response.session_flags & session_flags::ENCRYPT_DATA != 0;
+            let signing_required = negotiated.require_signing && !is_guest_or_null && !is_encrypted;
             let signing = match session_key.as_ref() {
                 Some(key) if mechanism != AuthMechanism::Anonymous && !is_guest_or_null => {
                     Some(SigningState::derive(
