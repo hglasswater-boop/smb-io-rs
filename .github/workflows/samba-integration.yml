@@ -1,0 +1,182 @@
+name: Samba Integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - '.github/workflows/samba-integration.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - '.github/workflows/samba-integration.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  samba:
+    name: Live SMB 3.1.1 interoperability
+    runs-on: ubuntu-latest
+    env:
+      SMB_PORT: '1445'
+      SMB_USER: smbtest
+      SMB_PASSWORD: 'XFiles-Rust-SMB-42!'
+      LARGE_OFFSET: '4294979641'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Samba
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y samba
+          sudo systemctl stop smbd nmbd 2>/dev/null || true
+          sudo pkill smbd 2>/dev/null || true
+
+      - name: Create SMB account and sparse fixtures
+        run: |
+          set -eux
+          sudo useradd --no-create-home --shell /usr/sbin/nologin "$SMB_USER" 2>/dev/null || true
+          printf '%s\n%s\n' "$SMB_PASSWORD" "$SMB_PASSWORD" | sudo smbpasswd -s -a "$SMB_USER"
+
+          sudo rm -rf /tmp/xfiles-smb-fixtures
+          sudo mkdir -p /tmp/xfiles-smb-fixtures
+          printf 'XFILES_RUST_SMB_OK' | sudo tee /tmp/xfiles-smb-fixtures/small.bin >/dev/null
+          sudo truncate -s $((LARGE_OFFSET + 16)) /tmp/xfiles-smb-fixtures/large.bin
+          printf 'XFILES_4G_MARKER' | sudo dd \
+            of=/tmp/xfiles-smb-fixtures/large.bin \
+            bs=1 \
+            seek="$LARGE_OFFSET" \
+            conv=notrunc \
+            status=none
+          sudo chown -R "$SMB_USER":"$SMB_USER" /tmp/xfiles-smb-fixtures
+          sudo chmod -R a+rX /tmp/xfiles-smb-fixtures
+
+      - name: Start signing-required Samba
+        run: |
+          cat > /tmp/xfiles-smb.conf <<EOF
+          [global]
+            server role = standalone server
+            workgroup = WORKGROUP
+            security = user
+            map to guest = Never
+            server min protocol = SMB2_10
+            server max protocol = SMB3_11
+            server signing = mandatory
+            smb ports = ${SMB_PORT}
+            interfaces = 127.0.0.1
+            bind interfaces only = yes
+            disable netbios = yes
+            log level = 2
+            log file = /tmp/xfiles-smb-signed.log
+
+          [auth]
+            path = /tmp/xfiles-smb-fixtures
+            read only = yes
+            guest ok = no
+            valid users = ${SMB_USER}
+          EOF
+          sudo smbd -D -s /tmp/xfiles-smb.conf
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/xfiles-smb-signed.log || true
+          exit 1
+
+      - name: Verify signed NTLMv2 small random read
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe -- \
+            verify 127.0.0.1 "$SMB_PORT" auth small.bin \
+            "$SMB_USER" "$SMB_PASSWORD" 0 \
+            5846494c45535f525553545f534d425f4f4b \
+            | tee /tmp/auth-small.log
+          grep -q '^mechanism: NtlmV2$' /tmp/auth-small.log
+          grep -q '^signing_required: true$' /tmp/auth-small.log
+          grep -q '^verified: true$' /tmp/auth-small.log
+
+      - name: Verify signed NTLMv2 read beyond 4 GiB
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe -- \
+            verify 127.0.0.1 "$SMB_PORT" auth large.bin \
+            "$SMB_USER" "$SMB_PASSWORD" "$LARGE_OFFSET" \
+            5846494c45535f34475f4d41524b4552 \
+            | tee /tmp/auth-large.log
+          grep -q "^verified_offset: ${LARGE_OFFSET}$" /tmp/auth-large.log
+          grep -q '^verified: true$' /tmp/auth-large.log
+
+      - name: Restart Samba for anonymous guest access
+        run: |
+          sudo pkill smbd 2>/dev/null || true
+          for attempt in $(seq 1 20); do
+            if ! pgrep smbd >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          sudo rm -f /run/samba/smbd.pid
+          cat > /tmp/xfiles-smb.conf <<EOF
+          [global]
+            server role = standalone server
+            workgroup = WORKGROUP
+            security = user
+            map to guest = Bad User
+            guest account = nobody
+            server min protocol = SMB2_10
+            server max protocol = SMB3_11
+            server signing = auto
+            smb ports = ${SMB_PORT}
+            interfaces = 127.0.0.1
+            bind interfaces only = yes
+            disable netbios = yes
+            log level = 2
+            log file = /tmp/xfiles-smb-guest.log
+
+          [guest]
+            path = /tmp/xfiles-smb-fixtures
+            read only = yes
+            guest ok = yes
+            public = yes
+          EOF
+          sudo smbd -D -s /tmp/xfiles-smb.conf
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/xfiles-smb-guest.log || true
+          exit 1
+
+      - name: Verify anonymous small random read
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe -- \
+            verify 127.0.0.1 "$SMB_PORT" guest small.bin - - 0 \
+            5846494c45535f525553545f534d425f4f4b \
+            | tee /tmp/guest-small.log
+          grep -q '^mechanism: Anonymous$' /tmp/guest-small.log
+          grep -q '^signing_required: false$' /tmp/guest-small.log
+          grep -q '^verified: true$' /tmp/guest-small.log
+
+      - name: Verify anonymous read beyond 4 GiB
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe -- \
+            verify 127.0.0.1 "$SMB_PORT" guest large.bin - - "$LARGE_OFFSET" \
+            5846494c45535f34475f4d41524b4552 \
+            | tee /tmp/guest-large.log
+          grep -q "^verified_offset: ${LARGE_OFFSET}$" /tmp/guest-large.log
+          grep -q '^verified: true$' /tmp/guest-large.log
+
+      - name: Dump Samba logs on failure
+        if: failure()
+        run: |
+          sudo cat /tmp/xfiles-smb-signed.log 2>/dev/null || true
+          sudo cat /tmp/xfiles-smb-guest.log 2>/dev/null || true
