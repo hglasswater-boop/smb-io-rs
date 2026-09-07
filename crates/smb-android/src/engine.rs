@@ -6,16 +6,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use smb_io_client::{
-    ClientError, CloseInfo, CloseOptions, FileHandle, ReadCancellationToken, SessionConnection,
-    TcpTransport,
+    ClientError, CloseInfo, CloseOptions, FileHandle, ReadCancellationToken,
+    ReadOnlyReconnectRecipe, ReconnectError, SessionConnection, TcpTransport,
+    connect_read_only_file, connect_read_only_file_cancelable, is_retryable_client_error,
 };
 use smb_io_stream::{StreamError, VideoReader, VideoReaderConfig};
 use tokio::runtime::{Builder, Runtime};
 
-use crate::reconnect::{
-    ReconnectError, ReconnectRecipe, connect_video, connect_video_cancelable,
-    is_retryable_client_error, is_retryable_stream_error, reconnect_backoff,
-};
+use crate::reconnect::{is_retryable_stream_error, reconnect_backoff};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AndroidEngineConfig {
@@ -212,7 +210,7 @@ struct VideoState {
 
 struct VideoSession {
     cancellation: ReadCancellationToken,
-    reconnect: ReconnectRecipe,
+    reconnect: ReadOnlyReconnectRecipe,
     state: Mutex<VideoState>,
 }
 
@@ -270,7 +268,7 @@ impl AndroidEngine {
         } = request;
 
         let reader = VideoReader::new(stream)?;
-        let reconnect = ReconnectRecipe::new(
+        let reconnect = ReadOnlyReconnectRecipe::new(
             host,
             port,
             share,
@@ -282,7 +280,7 @@ impl AndroidEngine {
         );
         let (session, file) = self
             .runtime
-            .block_on(connect_video(&reconnect))
+            .block_on(connect_read_only_file(&reconnect))
             .map_err(map_reconnect_error)?;
 
         self.videos.insert(VideoSession {
@@ -380,7 +378,7 @@ impl AndroidEngine {
                     .block_on(reconnect_backoff(self.reconnect_backoff));
             }
 
-            match self.runtime.block_on(connect_video_cancelable(
+            match self.runtime.block_on(connect_read_only_file_cancelable(
                 &video.reconnect,
                 &video.cancellation,
                 generation,
