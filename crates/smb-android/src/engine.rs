@@ -452,13 +452,7 @@ mod tests {
 
     #[test]
     fn open_request_validation_accepts_blank_username_for_anonymous() {
-        let request = VideoOpenRequest::new(
-            "nas.local",
-            "video",
-            "movies/sample.mkv",
-            "",
-            "",
-        );
+        let request = VideoOpenRequest::new("nas.local", "video", "movies/sample.mkv", "", "");
         assert!(validate_open_request(&request).is_ok());
     }
 }
