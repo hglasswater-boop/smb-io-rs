@@ -4,6 +4,7 @@
 //! SMB protocol behavior must remain in the portable core crates.
 
 mod engine;
+mod jni;
 
 pub use engine::{
     AndroidBridgeError, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest,
