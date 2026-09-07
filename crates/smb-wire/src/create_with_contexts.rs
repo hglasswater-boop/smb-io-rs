@@ -127,8 +127,15 @@ mod tests {
     fn request_places_contexts_on_an_eight_byte_boundary_after_the_name() {
         let request = CreateRequest::open_existing_read("movie.mkv");
         let context = CreateContext::new(b"DH2Q".to_vec(), vec![0x11; 32]).unwrap();
-        let message =
-            encode_create_request_with_contexts(&request, &[context.clone()], 4, 7, 9, 8).unwrap();
+        let message = encode_create_request_with_contexts(
+            &request,
+            std::slice::from_ref(&context),
+            4,
+            7,
+            9,
+            8,
+        )
+        .unwrap();
         let body = &message[SMB2_HEADER_SIZE..];
         let offset = usize::try_from(get_u32(body, 48)).unwrap();
         let len = usize::try_from(get_u32(body, 52)).unwrap();
