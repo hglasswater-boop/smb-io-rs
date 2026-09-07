@@ -1,7 +1,7 @@
 use smb_io_wire::{
-    Command, CreateRequest, CreateResponse, FileId, HeaderId, Smb2Header, StatusField,
-    create_disposition, create_options, desired_access, flags, impersonation_level, oplock_level,
-    share_access,
+    Command, CreateContext, CreateRequest, FileId, HeaderId, Smb2Header, StatusField,
+    create_disposition, create_options, decode_create_response_with_contexts, desired_access,
+    encode_create_request_with_contexts, flags, impersonation_level, oplock_level, share_access,
 };
 
 use crate::{ClientError, SessionConnection, Transport, TreeHandle};
@@ -104,6 +104,12 @@ impl FileHandle {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOpenResult {
+    pub file: FileHandle,
+    pub response_contexts: Vec<CreateContext>,
+}
+
 impl<T> SessionConnection<T>
 where
     T: Transport,
@@ -114,6 +120,19 @@ where
         path: impl Into<String>,
         options: FileOpenOptions,
     ) -> Result<FileHandle, ClientError> {
+        Ok(self
+            .open_file_with_contexts(tree, path, options, &[])
+            .await?
+            .file)
+    }
+
+    pub async fn open_file_with_contexts(
+        &mut self,
+        tree: &TreeHandle,
+        path: impl Into<String>,
+        options: FileOpenOptions,
+        request_contexts: &[CreateContext],
+    ) -> Result<FileOpenResult, ClientError> {
         let path = normalize_relative_path(path.into())?;
         if self.session_flags & smb_io_wire::session_flags::ENCRYPT_DATA != 0 {
             return Err(ClientError::Protocol(
@@ -136,8 +155,14 @@ where
             .connection
             .reserve_credits(credit_charge, options.credit_request)?;
         let message_id = self.connection.message_ids.allocate(credit_charge)?;
-        let mut request_message =
-            request.encode_message(message_id, self.session_id, tree.tree_id(), credit_request)?;
+        let mut request_message = encode_create_request_with_contexts(
+            &request,
+            request_contexts,
+            message_id,
+            self.session_id,
+            tree.tree_id(),
+            credit_request,
+        )?;
         set_credit_charge(&mut request_message, credit_charge);
         if self.signing_required {
             let signing = self.signing.as_ref().ok_or(ClientError::Protocol(
@@ -202,25 +227,29 @@ where
             ));
         }
 
-        let response = CreateResponse::decode_message(&response_message)?;
+        let (response, response_contexts) =
+            decode_create_response_with_contexts(&response_message)?;
         if response.file_id.is_zero() {
             return Err(ClientError::Protocol(
                 "successful CREATE response has a zero FileId",
             ));
         }
 
-        Ok(FileHandle {
-            file_id: response.file_id,
-            tree_id: tree.tree_id(),
-            path,
-            allocation_size: response.allocation_size,
-            end_of_file: response.end_of_file,
-            file_attributes: response.file_attributes,
-            creation_time: response.creation_time,
-            last_access_time: response.last_access_time,
-            last_write_time: response.last_write_time,
-            change_time: response.change_time,
-            create_action: response.create_action,
+        Ok(FileOpenResult {
+            file: FileHandle {
+                file_id: response.file_id,
+                tree_id: tree.tree_id(),
+                path,
+                allocation_size: response.allocation_size,
+                end_of_file: response.end_of_file,
+                file_attributes: response.file_attributes,
+                creation_time: response.creation_time,
+                last_access_time: response.last_access_time,
+                last_write_time: response.last_write_time,
+                change_time: response.change_time,
+                create_action: response.create_action,
+            },
+            response_contexts,
         })
     }
 }
