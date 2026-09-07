@@ -10,6 +10,7 @@ pub enum ClientError {
     Auth(AuthError),
     Timeout(&'static str),
     ServerStatus(u32),
+    Cancelled,
     Protocol(&'static str),
 }
 
@@ -21,6 +22,7 @@ impl fmt::Display for ClientError {
             Self::Auth(error) => write!(f, "SMB authentication error: {error}"),
             Self::Timeout(stage) => write!(f, "SMB operation timed out during {stage}"),
             Self::ServerStatus(status) => write!(f, "SMB server returned NTSTATUS 0x{status:08X}"),
+            Self::Cancelled => f.write_str("SMB operation was cancelled"),
             Self::Protocol(message) => write!(f, "SMB protocol error: {message}"),
         }
     }
@@ -32,7 +34,7 @@ impl std::error::Error for ClientError {
             Self::Io(error) => Some(error),
             Self::Wire(error) => Some(error),
             Self::Auth(error) => Some(error),
-            Self::Timeout(_) | Self::ServerStatus(_) | Self::Protocol(_) => None,
+            Self::Timeout(_) | Self::ServerStatus(_) | Self::Cancelled | Self::Protocol(_) => None,
         }
     }
 }
