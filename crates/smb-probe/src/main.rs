@@ -56,7 +56,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             run_reconnect_verify_on_plain_thread(request)
         }
         host => {
-            // Preserve the original CLI for quick manual NEGOTIATE checks.
             let port = parse_port(args.next())?;
             ensure_no_more(args)?;
             run_negotiate(host, port).await
@@ -346,7 +345,7 @@ fn ensure_no_more_with(
 
 fn parse_hex(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let input = value.as_bytes();
-    if input.is_empty() || !input.len().is_multiple_of(2) {
+    if input.is_empty() || input.len() % 2 != 0 {
         return Err("hex payload must contain an even, non-zero number of digits".into());
     }
     let mut out = Vec::with_capacity(input.len() / 2);
