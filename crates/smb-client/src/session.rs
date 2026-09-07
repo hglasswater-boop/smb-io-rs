@@ -246,8 +246,7 @@ where
                 session_key = None;
             }
 
-            let signing_required =
-                negotiated.require_signing && !is_guest_or_null && !is_encrypted;
+            let signing_required = negotiated.require_signing && !is_guest_or_null && !is_encrypted;
             let signing = match session_key.as_ref() {
                 Some(key) if !is_guest_or_null => Some(SigningState::derive(
                     negotiated.dialect,
