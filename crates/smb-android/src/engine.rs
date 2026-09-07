@@ -331,9 +331,9 @@ impl AndroidEngine {
                     file,
                     reader,
                 } = &mut *state;
-                let file = file.as_ref().ok_or(AndroidBridgeError::InternalState(
-                    "video handle is closed",
-                ))?;
+                let file = file
+                    .as_ref()
+                    .ok_or(AndroidBridgeError::InternalState("video handle is closed"))?;
                 self.runtime.block_on(reader.read_cancelable(
                     session,
                     file,
