@@ -3,20 +3,31 @@ use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
-use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
-    ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig,
-    ReadCancellationToken, SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig,
-    TreeConnectOptions,
+    ClientError, CloseInfo, CloseOptions, FileHandle, ReadCancellationToken, SessionConnection,
+    TcpTransport,
 };
 use smb_io_stream::{StreamError, VideoReader, VideoReaderConfig};
 use tokio::runtime::{Builder, Runtime};
+
+use crate::reconnect::{
+    ReconnectError, ReconnectRecipe, connect_video, connect_video_cancelable,
+    is_retryable_client_error, is_retryable_stream_error, reconnect_backoff,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AndroidEngineConfig {
     pub runtime_worker_threads: usize,
     pub max_read_bytes: usize,
+    /// Number of transport reconnect attempts allowed after one retryable read failure.
+    ///
+    /// The original read is retried only once after a connection has been re-established, so a
+    /// permanently failing server cannot trap the caller in an unbounded reconnect loop.
+    pub read_reconnect_attempts: usize,
+    /// Delay inserted before the second and later reconnect attempts.
+    pub reconnect_backoff: Duration,
 }
 
 impl Default for AndroidEngineConfig {
@@ -24,6 +35,8 @@ impl Default for AndroidEngineConfig {
         Self {
             runtime_worker_threads: 2,
             max_read_bytes: 8 * 1024 * 1024,
+            read_reconnect_attempts: 2,
+            reconnect_backoff: Duration::from_millis(250),
         }
     }
 }
@@ -31,9 +44,8 @@ impl Default for AndroidEngineConfig {
 /// Connection settings accepted by the Android boundary.
 ///
 /// This type intentionally does not implement `Debug` or `Clone`: it contains a plaintext password
-/// only long enough to construct the core `NtlmCredentials`, which immediately takes ownership of
-/// it and zeroizes the password allocation on drop for authenticated sessions. Anonymous sessions
-/// ignore the password field and XFiles passes it as empty.
+/// only until `open_video` moves it into a zeroizing reconnect recipe. Anonymous sessions ignore
+/// the password field and XFiles passes it as empty.
 pub struct VideoOpenRequest {
     pub host: String,
     pub port: u16,
@@ -200,6 +212,7 @@ struct VideoState {
 
 struct VideoSession {
     cancellation: ReadCancellationToken,
+    reconnect: ReconnectRecipe,
     state: Mutex<VideoState>,
 }
 
@@ -211,6 +224,8 @@ pub struct AndroidEngine {
     runtime: Runtime,
     videos: HandleTable<VideoSession>,
     max_read_bytes: usize,
+    read_reconnect_attempts: usize,
+    reconnect_backoff: Duration,
 }
 
 impl AndroidEngine {
@@ -235,6 +250,8 @@ impl AndroidEngine {
             runtime,
             videos: HandleTable::new(),
             max_read_bytes: config.max_read_bytes,
+            read_reconnect_attempts: config.read_reconnect_attempts,
+            reconnect_backoff: config.reconnect_backoff,
         })
     }
 
@@ -253,49 +270,24 @@ impl AndroidEngine {
         } = request;
 
         let reader = VideoReader::new(stream)?;
-        let mut client_guid = [0u8; 16];
-        let mut preauth_salt = [0u8; 32];
-        getrandom::fill(&mut client_guid).map_err(|_| AndroidBridgeError::RandomSource)?;
-        getrandom::fill(&mut preauth_salt).map_err(|_| AndroidBridgeError::RandomSource)?;
-        let unc_share = format!("\\\\{host}\\{share}");
-
-        let (session, file) = self.runtime.block_on(async move {
-            let transport =
-                TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
-            let mut connection = Connection::new(transport);
-            connection
-                .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
-                .await?;
-
-            let mut session = if username.is_empty() {
-                let mut auth = AnonymousNtlmProvider::new();
-                connection
-                    .session_setup(&mut auth, SessionSetupConfig::default())
-                    .await?
-            } else {
-                let mut credentials = NtlmCredentials::new(username, password);
-                if !domain.is_empty() {
-                    credentials = credentials.with_domain(domain);
-                }
-                if !workstation.is_empty() {
-                    credentials = credentials.with_workstation(workstation);
-                }
-                let mut auth = NtlmV2Provider::new(credentials);
-                connection
-                    .session_setup(&mut auth, SessionSetupConfig::default())
-                    .await?
-            };
-            let tree = session
-                .tree_connect(unc_share, TreeConnectOptions::default())
-                .await?;
-            let file = session
-                .open_file(&tree, path, FileOpenOptions::read_existing_random())
-                .await?;
-            Ok::<_, ClientError>((session, file))
-        })?;
+        let reconnect = ReconnectRecipe::new(
+            host,
+            port,
+            share,
+            path,
+            username,
+            password,
+            domain,
+            workstation,
+        );
+        let (session, file) = self
+            .runtime
+            .block_on(connect_video(&reconnect))
+            .map_err(map_reconnect_error)?;
 
         self.videos.insert(VideoSession {
             cancellation: ReadCancellationToken::new(),
+            reconnect,
             state: Mutex::new(VideoState {
                 session,
                 file: Some(file),
@@ -326,33 +318,102 @@ impl AndroidEngine {
                 maximum: self.max_read_bytes,
             });
         }
+
         let video = self.videos.get(handle)?;
         let generation = video.cancellation.generation();
         let mut state = lock(&video.state)?;
-        let VideoState {
-            session,
-            file,
-            reader,
-        } = &mut *state;
-        let file = file
-            .as_ref()
-            .ok_or(AndroidBridgeError::InternalState("video handle is closed"))?;
-        self.runtime
-            .block_on(reader.read_cancelable(
-                session,
-                file,
-                offset,
-                length,
+        let mut recovery_used = false;
+
+        loop {
+            let read_result = {
+                let VideoState {
+                    session,
+                    file,
+                    reader,
+                } = &mut *state;
+                let file = file.as_ref().ok_or(AndroidBridgeError::InternalState(
+                    "video handle is closed",
+                ))?;
+                self.runtime.block_on(reader.read_cancelable(
+                    session,
+                    file,
+                    offset,
+                    length,
+                    &video.cancellation,
+                    generation,
+                ))
+            };
+
+            match read_result {
+                Ok(data) => return Ok(data),
+                Err(error)
+                    if !recovery_used
+                        && self.read_reconnect_attempts > 0
+                        && is_retryable_stream_error(&error) =>
+                {
+                    if !video.cancellation.is_current(generation) {
+                        return Err(cancelled_bridge_error());
+                    }
+                    recovery_used = true;
+                    state.reader.invalidate();
+                    self.reconnect_video_state(&video, &mut state, generation)?;
+                }
+                Err(error) => return Err(AndroidBridgeError::Stream(error)),
+            }
+        }
+    }
+
+    fn reconnect_video_state(
+        &self,
+        video: &VideoSession,
+        state: &mut VideoState,
+        generation: u64,
+    ) -> Result<(), AndroidBridgeError> {
+        let mut last_retryable = None;
+
+        for attempt in 0..self.read_reconnect_attempts {
+            if !video.cancellation.is_current(generation) {
+                return Err(cancelled_bridge_error());
+            }
+            if attempt > 0 {
+                self.runtime
+                    .block_on(reconnect_backoff(self.reconnect_backoff));
+            }
+
+            match self.runtime.block_on(connect_video_cancelable(
+                &video.reconnect,
                 &video.cancellation,
                 generation,
-            ))
-            .map_err(AndroidBridgeError::Stream)
+            )) {
+                Ok((session, file)) => {
+                    state.session = session;
+                    state.file = Some(file);
+                    return Ok(());
+                }
+                Err(ReconnectError::Cancelled) => return Err(cancelled_bridge_error()),
+                Err(error) => {
+                    let retryable = matches!(
+                        &error,
+                        ReconnectError::Client(client) if is_retryable_client_error(client)
+                    );
+                    if !retryable {
+                        return Err(map_reconnect_error(error));
+                    }
+                    last_retryable = Some(error);
+                }
+            }
+        }
+
+        Err(last_retryable.map_or(
+            AndroidBridgeError::InternalState("reconnect attempts exhausted without an error"),
+            map_reconnect_error,
+        ))
     }
 
     /// Advances the generation immediately without taking the session I/O mutex.
     ///
-    /// A concurrent `read_at` can therefore send SMB2 CANCEL while this method returns promptly to
-    /// a player thread.
+    /// A concurrent `read_at` can therefore send SMB2 CANCEL, or abort a reconnect handshake,
+    /// while this method returns promptly to a player thread.
     pub fn seek(&self, handle: VideoHandle) -> Result<u64, AndroidBridgeError> {
         let video = self.videos.get(handle)?;
         Ok(video.cancellation.advance())
@@ -369,6 +430,18 @@ impl AndroidEngine {
             .block_on(state.session.close_file(file, CloseOptions::default()))
             .map_err(AndroidBridgeError::Client)
     }
+}
+
+fn map_reconnect_error(error: ReconnectError) -> AndroidBridgeError {
+    match error {
+        ReconnectError::Client(error) => AndroidBridgeError::Client(error),
+        ReconnectError::Cancelled => cancelled_bridge_error(),
+        ReconnectError::RandomSource => AndroidBridgeError::RandomSource,
+    }
+}
+
+fn cancelled_bridge_error() -> AndroidBridgeError {
+    AndroidBridgeError::Stream(StreamError::Client(ClientError::Cancelled))
 }
 
 fn validate_open_request(request: &VideoOpenRequest) -> Result<(), AndroidBridgeError> {
@@ -436,6 +509,13 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn reconnect_policy_defaults_to_one_recovery_episode_with_two_connect_attempts() {
+        let config = AndroidEngineConfig::default();
+        assert_eq!(config.read_reconnect_attempts, 2);
+        assert_eq!(config.reconnect_backoff, Duration::from_millis(250));
     }
 
     #[test]
