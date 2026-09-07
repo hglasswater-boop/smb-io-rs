@@ -18,6 +18,7 @@ jobs:
   durable-reconnect:
     name: DH2Q to TCP drop to DH2C
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       SMB_PORT: '1445'
       SMB_USER: smbtest
