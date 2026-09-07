@@ -45,11 +45,7 @@ impl RecoveringReadOnlyFile {
 
     /// Positional read with a single safe reconnect-and-retry attempt for retryable connection
     /// failures.
-    pub async fn read_at(
-        &mut self,
-        offset: u64,
-        length: usize,
-    ) -> Result<Vec<u8>, ReconnectError> {
+    pub async fn read_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, ReconnectError> {
         match self.session.read_at(&self.file, offset, length).await {
             Ok(data) => Ok(data),
             Err(error) if is_retryable_client_error(&error) => {
