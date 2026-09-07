@@ -4,7 +4,8 @@ use smb_io_wire::{
 };
 
 use crate::{
-    ClientError, CloseOptions, FileHandle, FileOpenOptions, SessionConnection, Transport, TreeHandle,
+    ClientError, CloseOptions, FileHandle, FileOpenOptions, SessionConnection, Transport,
+    TreeHandle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
