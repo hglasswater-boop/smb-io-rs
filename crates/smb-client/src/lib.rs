@@ -28,7 +28,7 @@ pub use cancellation::ReadCancellationToken;
 pub use close::{CloseInfo, CloseOptions};
 pub use credits::CreditManager;
 pub use error::ClientError;
-pub use file::{FileHandle, FileOpenOptions};
+pub use file::{FileHandle, FileOpenOptions, FileOpenResult};
 pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
