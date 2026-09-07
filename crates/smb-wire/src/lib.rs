@@ -2,13 +2,14 @@
 
 //! SMB2/SMB3 wire-format primitives.
 //!
-//! This crate owns packet representation, framing, endian-safe encoding/decoding,
+//! This crate owns packet representation, framing, endian-safe encode/decode,
 //! and validation only. It must not depend on sockets, credentials, reconnect
 //! policy, platform bindings, or application caching.
 
 mod cancel;
 mod close;
 mod create;
+mod create_context;
 mod error;
 mod frame;
 mod header;
@@ -27,6 +28,9 @@ pub use create::{
     CREATE_RESPONSE_STRUCTURE_SIZE, CreateRequest, CreateResponse, FileId, create_action,
     create_disposition, create_options, desired_access, impersonation_level, oplock_level,
     share_access,
+};
+pub use create_context::{
+    CREATE_CONTEXT_FIXED_SIZE, CreateContext, decode_create_contexts, encode_create_contexts,
 };
 pub use error::WireError;
 pub use frame::{
