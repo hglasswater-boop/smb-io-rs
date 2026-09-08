@@ -311,7 +311,8 @@ pub async fn connect_read_only_file(
             match session.reconnect_file_durable_v2(&tree, &existing).await {
                 Ok(refreshed) => {
                     let file = refreshed.file().clone();
-                    if let Err(error) = recipe.remember_or_validate_file(&mut session, &file).await {
+                    if let Err(error) = recipe.remember_or_validate_file(&mut session, &file).await
+                    {
                         durable_state.handle = None;
                         let _ = session
                             .close_file(refreshed.into_file(), CloseOptions::default())
@@ -348,7 +349,8 @@ pub async fn connect_read_only_file(
             {
                 Ok(opened) => {
                     let file = opened.file().clone();
-                    if let Err(error) = recipe.remember_or_validate_file(&mut session, &file).await {
+                    if let Err(error) = recipe.remember_or_validate_file(&mut session, &file).await
+                    {
                         let _ = session
                             .close_file(opened.into_file(), CloseOptions::default())
                             .await;
