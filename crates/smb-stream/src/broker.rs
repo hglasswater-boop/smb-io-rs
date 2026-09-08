@@ -5,13 +5,15 @@ use smb_io_client::{
     CloseInfo, CloseOptions, FileHandle, ReadCancellationToken, ReadOnlyReconnectRecipe,
     ReadReconnectPolicy, RecoveringReadOnlyFile, SessionConnection, TcpTransport, Transport,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{StreamError, VideoReader, VideoReaderConfig};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VideoBrokerConfig {
     pub reader: VideoReaderConfig,
+    /// Capacity reserved for foreground/control commands. Speculative prefetch is latest-wins and
+    /// does not consume this FIFO capacity.
     pub queue_capacity: usize,
 }
 
@@ -72,6 +74,7 @@ enum InteractiveCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
 struct PrefetchCommand {
     playback_generation: u64,
     prefetch_generation: u64,
@@ -81,15 +84,17 @@ struct PrefetchCommand {
 
 /// Cheap cloneable control surface used by a player, JNI adapter, or FFmpeg bridge.
 ///
-/// Foreground reads and control operations use a dedicated high-priority queue. Starting a
-/// foreground read also invalidates the speculative-I/O generation, which causes an in-flight
-/// prefetch READ, reconnect, or reconnect backoff to stop before the foreground request is run.
+/// Foreground reads and control operations use a dedicated high-priority FIFO. Speculative
+/// prefetch is latest-wins: a newer hint replaces an older queued hint instead of building a stale
+/// backlog. Starting a foreground read also invalidates the speculative-I/O generation, which
+/// causes an in-flight prefetch READ, reconnect, or reconnect backoff to stop before the foreground
+/// request is run.
 #[derive(Clone)]
 pub struct VideoBrokerHandle {
     cancellation: ReadCancellationToken,
     prefetch_cancellation: ReadCancellationToken,
     interactive_commands: mpsc::Sender<InteractiveCommand>,
-    background_commands: mpsc::Sender<PrefetchCommand>,
+    background_command: watch::Sender<Option<PrefetchCommand>>,
     file_len: u64,
 }
 
@@ -128,12 +133,10 @@ impl VideoBrokerHandle {
         reply_rx.await.map_err(|_| BrokerError::Closed)?
     }
 
-    /// Queues speculative data for the current playback and prefetch generations.
+    /// Publishes a speculative hint without blocking the caller.
     ///
-    /// Prefetch is a hint, so a full background queue drops the new command instead of blocking a
-    /// caller that may be on a playback thread. A closed broker remains an error. Any later
-    /// foreground read invalidates queued or in-flight speculative work before it can compete for
-    /// the SMB connection.
+    /// Only the newest queued hint is retained. Any later foreground read invalidates queued or
+    /// in-flight speculative work before it can compete for the SMB connection.
     pub fn prefetch(&self, offset: u64, length: usize) -> Result<(), BrokerError> {
         let command = PrefetchCommand {
             playback_generation: self.cancellation.generation(),
@@ -141,10 +144,9 @@ impl VideoBrokerHandle {
             offset,
             length,
         };
-        match self.background_commands.try_send(command) {
-            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(BrokerError::Closed),
-        }
+        self.background_command
+            .send(Some(command))
+            .map_err(|_| BrokerError::Closed)
     }
 
     /// Gracefully stops the broker and sends one SMB CLOSE for the current file handle.
@@ -181,12 +183,12 @@ enum BrokerSource<T> {
 /// The runner is deliberately returned as a future-owning object instead of internally calling
 /// `tokio::spawn`. This keeps the crate compatible with runtimes that want to place SMB I/O on a
 /// dedicated task or LocalSet, while Android can simply run it on its native Tokio runtime.
-/// Foreground commands are selected before ready background-prefetch commands.
+/// Foreground commands are selected before ready background-prefetch hints.
 pub struct VideoBrokerRunner<T> {
     cancellation: ReadCancellationToken,
     prefetch_cancellation: ReadCancellationToken,
     interactive_commands: mpsc::Receiver<InteractiveCommand>,
-    background_commands: mpsc::Receiver<PrefetchCommand>,
+    background_command: watch::Receiver<Option<PrefetchCommand>>,
     source: Option<BrokerSource<T>>,
     reader: VideoReader,
     active_generation: u64,
@@ -199,7 +201,7 @@ where
     pub async fn run(mut self) {
         enum SelectedCommand {
             Interactive(Option<InteractiveCommand>),
-            Background(Option<PrefetchCommand>),
+            Background(Result<(), watch::error::RecvError>),
         }
 
         let mut interactive_open = true;
@@ -211,8 +213,8 @@ where
                 command = self.interactive_commands.recv(), if interactive_open => {
                     SelectedCommand::Interactive(command)
                 }
-                command = self.background_commands.recv(), if background_open => {
-                    SelectedCommand::Background(command)
+                changed = self.background_command.changed(), if background_open => {
+                    SelectedCommand::Background(changed)
                 }
             };
 
@@ -232,10 +234,13 @@ where
                     break;
                 }
                 SelectedCommand::Interactive(None) => interactive_open = false,
-                SelectedCommand::Background(Some(command)) => {
-                    let _ = self.process_prefetch(command).await;
+                SelectedCommand::Background(Ok(())) => {
+                    let command = *self.background_command.borrow_and_update();
+                    if let Some(command) = command {
+                        let _ = self.process_prefetch(command).await;
+                    }
                 }
-                SelectedCommand::Background(None) => background_open = false,
+                SelectedCommand::Background(Err(_)) => background_open = false,
             }
         }
     }
@@ -473,19 +478,19 @@ fn broker_from_source<T>(
     let cancellation = ReadCancellationToken::new();
     let prefetch_cancellation = ReadCancellationToken::new();
     let (interactive_tx, interactive_rx) = mpsc::channel(queue_capacity);
-    let (background_tx, background_rx) = mpsc::channel(queue_capacity);
+    let (background_tx, background_rx) = watch::channel(None);
     let handle = VideoBrokerHandle {
         cancellation: cancellation.clone(),
         prefetch_cancellation: prefetch_cancellation.clone(),
         interactive_commands: interactive_tx,
-        background_commands: background_tx,
+        background_command: background_tx,
         file_len,
     };
     let runner = VideoBrokerRunner {
         cancellation,
         prefetch_cancellation,
         interactive_commands: interactive_rx,
-        background_commands: background_rx,
+        background_command: background_rx,
         source: Some(source),
         reader,
         active_generation: 0,
@@ -522,12 +527,12 @@ mod tests {
         let prefetch_cancellation = ReadCancellationToken::new();
         let old_prefetch_generation = prefetch_cancellation.generation();
         let (interactive_tx, mut interactive_rx) = mpsc::channel(1);
-        let (background_tx, _background_rx) = mpsc::channel(1);
+        let (background_tx, _background_rx) = watch::channel(None);
         let handle = VideoBrokerHandle {
             cancellation,
             prefetch_cancellation: prefetch_cancellation.clone(),
             interactive_commands: interactive_tx,
-            background_commands: background_tx,
+            background_command: background_tx,
             file_len: 123,
         };
 
@@ -546,27 +551,25 @@ mod tests {
     }
 
     #[test]
-    fn full_prefetch_queue_drops_new_hint_without_waiting() {
+    fn prefetch_hints_are_latest_wins_without_waiting() {
         let cancellation = ReadCancellationToken::new();
         let prefetch_cancellation = ReadCancellationToken::new();
         let (interactive_tx, _interactive_rx) = mpsc::channel(1);
-        let (background_tx, mut background_rx) = mpsc::channel(1);
+        let (background_tx, mut background_rx) = watch::channel(None);
         let handle = VideoBrokerHandle {
             cancellation,
             prefetch_cancellation,
             interactive_commands: interactive_tx,
-            background_commands: background_tx,
+            background_command: background_tx,
             file_len: 123,
         };
 
         handle.prefetch(10, 4).unwrap();
-        handle.prefetch(20, 4).unwrap();
+        handle.prefetch(20, 8).unwrap();
 
-        let queued = background_rx.try_recv().unwrap();
-        assert_eq!(queued.offset, 10);
-        assert!(matches!(
-            background_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        let latest = *background_rx.borrow_and_update();
+        let latest = latest.expect("latest prefetch hint");
+        assert_eq!(latest.offset, 20);
+        assert_eq!(latest.length, 8);
     }
 }
