@@ -244,7 +244,8 @@ impl VideoReader {
             hint_offset,
             hint_length,
             cancellation_context,
-        )? else {
+        )?
+        else {
             return Ok(0);
         };
 
@@ -303,7 +304,8 @@ impl VideoReader {
             hint_offset,
             hint_length,
             cancellation_context,
-        )? else {
+        )?
+        else {
             return Ok(0);
         };
 

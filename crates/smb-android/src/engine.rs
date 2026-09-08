@@ -316,7 +316,10 @@ impl AndroidEngine {
     ) -> Result<(), AndroidBridgeError> {
         self.validate_read_length(length)?;
         let video = self.videos.get(handle)?;
-        video.broker.prefetch(offset, length).map_err(map_broker_error)
+        video
+            .broker
+            .prefetch(offset, length)
+            .map_err(map_broker_error)
     }
 
     /// Advances the playback generation immediately without waiting for the broker runner.
