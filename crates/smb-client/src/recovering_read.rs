@@ -213,9 +213,11 @@ impl RecoveringReadOnlyFile {
             }
         }
 
-        Err(last_retryable.unwrap_or(ReconnectError::Client(
-            ClientError::Protocol("SMB reconnect attempts exhausted without an error"),
-        )))
+        Err(
+            last_retryable.unwrap_or(ReconnectError::Client(ClientError::Protocol(
+                "SMB reconnect attempts exhausted without an error",
+            ))),
+        )
     }
 
     async fn reconnect_cancelable(
@@ -247,9 +249,11 @@ impl RecoveringReadOnlyFile {
             }
         }
 
-        Err(last_retryable.unwrap_or(ReconnectError::Client(
-            ClientError::Protocol("SMB reconnect attempts exhausted without an error"),
-        )))
+        Err(
+            last_retryable.unwrap_or(ReconnectError::Client(ClientError::Protocol(
+                "SMB reconnect attempts exhausted without an error",
+            ))),
+        )
     }
 }
 
@@ -317,9 +321,7 @@ mod tests {
             ClientError::Protocol("bad frame"),
         )));
         assert!(!is_retryable_reconnect_error(&ReconnectError::Cancelled));
-        assert!(!is_retryable_reconnect_error(
-            &ReconnectError::RandomSource
-        ));
+        assert!(!is_retryable_reconnect_error(&ReconnectError::RandomSource));
     }
 
     #[tokio::test]
@@ -333,12 +335,7 @@ mod tests {
         });
 
         assert!(matches!(
-            reconnect_backoff_cancelable(
-                Duration::from_secs(30),
-                &cancellation,
-                generation,
-            )
-            .await,
+            reconnect_backoff_cancelable(Duration::from_secs(30), &cancellation, generation,).await,
             Err(ReconnectError::Cancelled)
         ));
         task.await.unwrap();
