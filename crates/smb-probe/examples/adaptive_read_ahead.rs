@@ -71,7 +71,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("adaptive_bootstrap_bytes: {bootstrap}");
     println!("adaptive_foreground_fetches: {}", metrics.foreground_fetches);
-    println!("adaptive_foreground_fetch_bytes: {}", metrics.foreground_fetch_bytes);
+    println!(
+        "adaptive_foreground_fetch_bytes: {}",
+        metrics.foreground_fetch_bytes
+    );
     println!("adaptive_throughput_bytes_per_second: {throughput}");
     println!("adaptive_target_bytes: {target}");
     println!("adaptive_changed: true");
@@ -81,7 +84,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" { String::new() } else { value }
+    if value == "-" {
+        String::new()
+    } else {
+        value
+    }
 }
 
 fn usage() -> String {
