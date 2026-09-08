@@ -126,6 +126,7 @@ struct PrefetchExtension {
     reader_generation: u64,
     expected_cache_start: u64,
     expected_cache_len: usize,
+    drop_prefix: usize,
 }
 
 /// Stateful video-oriented reader layered on positional SMB reads.
@@ -169,6 +170,38 @@ impl VideoReader {
             .as_ref()
             .map(|cache| Ok((cache.start, cache.end()?)))
             .transpose()
+    }
+
+    /// Returns a low-water speculative refill hint for the current sequential cursor.
+    ///
+    /// The broker uses this after delivering a foreground read. No network I/O happens here.
+    pub(crate) fn automatic_prefetch_hint(
+        &self,
+        file_len: u64,
+    ) -> Result<Option<(u64, usize)>, StreamError> {
+        let Some(cursor) = self.last_request_end else {
+            return Ok(None);
+        };
+        if cursor >= file_len {
+            return Ok(None);
+        }
+        let Some(cache) = self.cache.as_ref() else {
+            return Ok(None);
+        };
+        if cache.generation != self.generation {
+            return Ok(None);
+        }
+
+        let cache_end = cache.end()?;
+        if cursor < cache.start || cursor > cache_end {
+            return Ok(None);
+        }
+        let ahead = usize::try_from(cache_end - cursor).unwrap_or(usize::MAX);
+        let low_water = (self.config.read_ahead_bytes / 2).max(1);
+        if ahead > low_water {
+            return Ok(None);
+        }
+        Ok(Some((cursor, self.config.read_ahead_bytes)))
     }
 
     /// Explicitly moves the logical playback head and invalidates stale read-ahead data.
@@ -224,8 +257,8 @@ impl VideoReader {
     /// Extends the current sequential cache without moving the foreground playback cursor.
     ///
     /// The hint must point inside the current cache or exactly at its end. Unrelated/far-away hints,
-    /// full caches, EOF, and absent caches are ignored so speculative work never evicts useful
-    /// foreground data.
+    /// EOF, and absent caches are ignored. A full cache may roll forward only when already-consumed
+    /// prefix bytes can be reclaimed without evicting data around the foreground cursor.
     pub async fn prefetch_cancelable<T>(
         &mut self,
         session: &mut SessionConnection<T>,
@@ -465,14 +498,36 @@ impl VideoReader {
         }
 
         let cache_end = cache.end()?;
-        if hint_offset < cache.start || hint_offset > cache_end {
-            return Ok(None);
-        }
-        if cache.data.len() >= self.config.max_cache_bytes || cache_end >= file_len {
+        if hint_offset < cache.start || hint_offset > cache_end || cache_end >= file_len {
             return Ok(None);
         }
 
-        let available_capacity = self.config.max_cache_bytes - cache.data.len();
+        // Drop only data safely behind the actual foreground cursor. An explicit prefetch hint is
+        // allowed to point farther ahead, but it must never evict bytes the player has not consumed.
+        let cursor = self.last_request_end.unwrap_or(cache.start);
+        let retain_back = u64::try_from(
+            self.config
+                .read_ahead_bytes
+                .min(self.config.max_cache_bytes),
+        )
+        .map_err(|_| StreamError::OffsetOverflow)?;
+        let keep_from = cursor.saturating_sub(retain_back).max(cache.start);
+        let drop_prefix =
+            usize::try_from(keep_from - cache.start).map_err(|_| StreamError::OffsetOverflow)?;
+        let retained_len = cache
+            .data
+            .len()
+            .checked_sub(drop_prefix)
+            .ok_or(StreamError::OffsetOverflow)?;
+        let available_capacity = self
+            .config
+            .max_cache_bytes
+            .checked_sub(retained_len)
+            .ok_or(StreamError::OffsetOverflow)?;
+        if available_capacity == 0 {
+            return Ok(None);
+        }
+
         let file_remaining = usize::try_from(file_len - cache_end).unwrap_or(usize::MAX);
         let fetch_len = self
             .config
@@ -489,6 +544,7 @@ impl VideoReader {
             reader_generation: self.generation,
             expected_cache_start: cache.start,
             expected_cache_len: cache.data.len(),
+            drop_prefix,
         }))
     }
 
@@ -540,8 +596,20 @@ impl VideoReader {
             || cache.start != plan.expected_cache_start
             || cache.data.len() != plan.expected_cache_len
             || cache.end()? != plan.offset
+            || plan.drop_prefix > cache.data.len()
         {
             return Ok(0);
+        }
+
+        // Mutate the cache only after the speculative read succeeded and the plan is still current.
+        if plan.drop_prefix > 0 {
+            let dropped =
+                u64::try_from(plan.drop_prefix).map_err(|_| StreamError::OffsetOverflow)?;
+            cache.data.drain(..plan.drop_prefix);
+            cache.start = cache
+                .start
+                .checked_add(dropped)
+                .ok_or(StreamError::OffsetOverflow)?;
         }
 
         let capacity = self.config.max_cache_bytes - cache.data.len();
@@ -775,6 +843,85 @@ mod tests {
         );
         assert_eq!(reader.cached_range().unwrap(), Some((100, 108)));
         assert_eq!(reader.last_request_end, Some(102));
+    }
+
+    #[test]
+    fn automatic_prefetch_starts_at_low_water_mark() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 8,
+            max_cache_bytes: 32,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: vec![1; 16],
+        });
+
+        reader.last_request_end = Some(108);
+        assert_eq!(reader.automatic_prefetch_hint(1_000).unwrap(), None);
+        reader.last_request_end = Some(112);
+        assert_eq!(
+            reader.automatic_prefetch_hint(1_000).unwrap(),
+            Some((112, 8))
+        );
+    }
+
+    #[test]
+    fn successful_prefetch_rolls_full_cache_forward() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 4,
+            max_cache_bytes: 12,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: (0u8..12).collect(),
+        });
+        reader.last_request_end = Some(110);
+
+        let plan = reader
+            .prepare_prefetch_extension(1_000, 110, 1, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.offset, 112);
+        assert_eq!(plan.fetch_len, 4);
+        assert_eq!(plan.drop_prefix, 6);
+
+        assert_eq!(
+            reader
+                .finish_prefetch_extension(plan, vec![12, 13, 14, 15], None)
+                .unwrap(),
+            4
+        );
+        assert_eq!(reader.cached_range().unwrap(), Some((106, 116)));
+        assert_eq!(reader.cached_bytes(), 10);
+        assert_eq!(reader.last_request_end, Some(110));
+    }
+
+    #[test]
+    fn explicit_prefetch_never_drops_unconsumed_bytes() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 4,
+            max_cache_bytes: 12,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: (0u8..12).collect(),
+        });
+        reader.last_request_end = Some(104);
+
+        let plan = reader
+            .prepare_prefetch_extension(1_000, 110, 1, None)
+            .unwrap();
+        assert!(plan.is_none());
+        assert_eq!(reader.cached_range().unwrap(), Some((100, 112)));
     }
 
     #[test]

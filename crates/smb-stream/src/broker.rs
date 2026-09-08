@@ -65,6 +65,7 @@ impl From<StreamError> for BrokerError {
 enum InteractiveCommand {
     Read {
         generation: u64,
+        prefetch_generation: u64,
         offset: u64,
         length: usize,
         reply: oneshot::Sender<Result<Vec<u8>, BrokerError>>,
@@ -118,12 +119,13 @@ impl VideoBrokerHandle {
     }
 
     pub async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, BrokerError> {
-        self.prefetch_cancellation.advance();
+        let prefetch_generation = self.prefetch_cancellation.advance();
         let generation = self.cancellation.generation();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.interactive_commands
             .send(InteractiveCommand::Read {
                 generation,
+                prefetch_generation,
                 offset,
                 length,
                 reply: reply_tx,
@@ -190,6 +192,7 @@ pub struct VideoBrokerRunner<T> {
     interactive_commands: mpsc::Receiver<InteractiveCommand>,
     background_command: watch::Receiver<Option<PrefetchCommand>>,
     source: Option<BrokerSource<T>>,
+    file_len: u64,
     reader: VideoReader,
     active_generation: u64,
 }
@@ -221,12 +224,21 @@ where
             match selected {
                 SelectedCommand::Interactive(Some(InteractiveCommand::Read {
                     generation,
+                    prefetch_generation,
                     offset,
                     length,
                     reply,
                 })) => {
                     let result = self.process_read(generation, offset, length).await;
+                    let auto_prefetch = if result.is_ok() {
+                        self.automatic_prefetch_command(generation, prefetch_generation)
+                    } else {
+                        None
+                    };
                     let _ = reply.send(result);
+                    if let Some(command) = auto_prefetch {
+                        let _ = self.process_prefetch(command).await;
+                    }
                 }
                 SelectedCommand::Interactive(Some(InteractiveCommand::Shutdown { reply })) => {
                     let result = self.close_source().await;
@@ -328,6 +340,25 @@ where
                 .await
                 .map_err(BrokerError::Stream),
         }
+    }
+
+    fn automatic_prefetch_command(
+        &self,
+        playback_generation: u64,
+        prefetch_generation: u64,
+    ) -> Option<PrefetchCommand> {
+        if !self.cancellation.is_current(playback_generation)
+            || !self.prefetch_cancellation.is_current(prefetch_generation)
+        {
+            return None;
+        }
+        let (offset, length) = self.reader.automatic_prefetch_hint(self.file_len).ok()??;
+        Some(PrefetchCommand {
+            playback_generation,
+            prefetch_generation,
+            offset,
+            length,
+        })
     }
 
     async fn process_read(
@@ -492,6 +523,7 @@ fn broker_from_source<T>(
         interactive_commands: interactive_rx,
         background_command: background_rx,
         source: Some(source),
+        file_len,
         reader,
         active_generation: 0,
     };
