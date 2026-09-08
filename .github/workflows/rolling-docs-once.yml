@@ -1,0 +1,29 @@
+name: Rolling Docs Once
+
+on:
+  push:
+    branches:
+      - feature/rolling-video-cache
+    paths:
+      - '.github/workflows/rolling-docs-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/rolling-video-cache
+      - name: Fix rolling prefetch docs
+        run: python3 tools/fix_rolling_prefetch_docs.py
+      - name: Commit docs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/smb-stream/src/video.rs
+          git diff --cached --quiet && exit 1
+          git commit -m "docs(stream): describe rolling prefetch cache"
+          git push
