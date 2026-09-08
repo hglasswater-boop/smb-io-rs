@@ -83,7 +83,7 @@ impl RecoveringReadOnlyFile {
     }
 
     /// Closes the current SMB file without replaying the mutation if the connection is lost.
-    pub async fn close(self) -> Result<CloseInfo, ClientError> {
+    pub async fn close(mut self) -> Result<CloseInfo, ClientError> {
         self.session
             .close_file(self.file, CloseOptions::default())
             .await
