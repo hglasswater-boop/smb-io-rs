@@ -8,7 +8,8 @@ use smb_io_client::{
 
 #[derive(Debug, Clone, Copy)]
 pub struct VideoReaderConfig {
-    /// Amount of data fetched on a cache miss even if the caller asks for less.
+    /// Target speculative read-ahead window. Cache misses fetch at most one configured
+    /// pipeline wave beyond caller demand; background prefetch grows the rolling cache farther.
     pub read_ahead_bytes: usize,
     /// Maximum bytes retained in the single contiguous cache window.
     pub max_cache_bytes: usize,
@@ -462,11 +463,19 @@ impl VideoReader {
         }
 
         let remaining = usize::try_from(file_len - offset).unwrap_or(usize::MAX);
+        // Keep foreground miss/seek latency to one configured pipeline wave. The broker's
+        // low-water refill extends the cache in the background after the requested bytes return.
+        let foreground_read_ahead = self
+            .config
+            .pipeline
+            .chunk_size
+            .saturating_mul(self.config.pipeline.max_in_flight)
+            .min(self.config.read_ahead_bytes);
         let fetch_len = if target > self.config.max_cache_bytes {
             target
         } else {
             target
-                .max(self.config.read_ahead_bytes)
+                .max(foreground_read_ahead)
                 .min(self.config.max_cache_bytes)
                 .min(remaining)
         };
@@ -761,6 +770,61 @@ mod tests {
 
         let fetch = reader.prepare_read(1_000, 500, 4, None).unwrap();
         assert!(matches!(fetch, PreparedRead::Fetch { target: 4, .. }));
+    }
+
+    #[test]
+    fn cache_miss_prefetch_is_bounded_to_one_pipeline_wave() {
+        let mut reader = VideoReader::new(VideoReaderConfig::default()).unwrap();
+        let plan = reader
+            .prepare_read(64 * 1024 * 1024, 0, 64 * 1024, None)
+            .unwrap();
+
+        assert!(matches!(
+            plan,
+            PreparedRead::Fetch {
+                target: 65_536,
+                fetch_len: 1_048_576,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn configured_read_ahead_caps_the_foreground_pipeline_wave() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 512 * 1024,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        let plan = reader
+            .prepare_read(64 * 1024 * 1024, 0, 64 * 1024, None)
+            .unwrap();
+
+        assert!(matches!(
+            plan,
+            PreparedRead::Fetch {
+                target: 65_536,
+                fetch_len: 524_288,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn caller_demand_larger_than_one_wave_is_not_shortened() {
+        let mut reader = VideoReader::new(VideoReaderConfig::default()).unwrap();
+        let plan = reader
+            .prepare_read(64 * 1024 * 1024, 0, 1536 * 1024, None)
+            .unwrap();
+
+        assert!(matches!(
+            plan,
+            PreparedRead::Fetch {
+                target: 1_572_864,
+                fetch_len: 1_572_864,
+                ..
+            }
+        ));
     }
 
     #[test]
