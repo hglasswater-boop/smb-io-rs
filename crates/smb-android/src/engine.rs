@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use smb_io_client::{
-    ClientError, CloseInfo, ReadCancellationToken, ReadOnlyReconnectRecipe, ReadReconnectPolicy,
-    ReconnectError, RecoveringReadOnlyFile,
+    ClientError, CloseInfo, ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError,
 };
-use smb_io_stream::{StreamError, VideoReader, VideoReaderConfig};
+use smb_io_stream::{
+    BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
+    recovering_video_broker_with_policy,
+};
 use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Clone, Copy)]
@@ -199,20 +201,15 @@ impl<T> HandleTable<T> {
     }
 }
 
-struct VideoState {
-    source: Option<RecoveringReadOnlyFile>,
-    reader: VideoReader,
-}
-
 struct VideoSession {
-    cancellation: ReadCancellationToken,
-    state: Mutex<VideoState>,
+    broker: VideoBrokerHandle,
 }
 
 /// Long-lived runtime and opaque-handle owner for the Android/JNI adapter.
 ///
-/// JNI functions should remain mechanical wrappers around this type. No SMB packet logic belongs
-/// in those functions.
+/// JNI functions remain mechanical wrappers around this type. SMB lifecycle, reconnect,
+/// read-ahead, prefetch cancellation, and I/O priority scheduling live in the portable client and
+/// stream crates.
 pub struct AndroidEngine {
     runtime: Runtime,
     videos: HandleTable<VideoSession>,
@@ -263,7 +260,6 @@ impl AndroidEngine {
             stream,
         } = request;
 
-        let reader = VideoReader::new(stream)?;
         let reconnect = ReadOnlyReconnectRecipe::new(
             host,
             port,
@@ -274,31 +270,27 @@ impl AndroidEngine {
             domain,
             workstation,
         );
-        let source = self
+        let broker_config = VideoBrokerConfig {
+            reader: stream,
+            ..VideoBrokerConfig::default()
+        };
+        let (broker, runner) = self
             .runtime
-            .block_on(RecoveringReadOnlyFile::connect_with_policy(
+            .block_on(recovering_video_broker_with_policy(
                 reconnect,
                 self.reconnect_policy,
+                broker_config,
             ))
-            .map_err(map_reconnect_error)?;
+            .map_err(map_broker_error)?;
 
-        self.videos.insert(VideoSession {
-            cancellation: ReadCancellationToken::new(),
-            state: Mutex::new(VideoState {
-                source: Some(source),
-                reader,
-            }),
-        })
+        let handle = self.videos.insert(VideoSession { broker })?;
+        self.runtime.spawn(runner.run());
+        Ok(handle)
     }
 
     pub fn len(&self, handle: VideoHandle) -> Result<u64, AndroidBridgeError> {
         let video = self.videos.get(handle)?;
-        let state = lock(&video.state)?;
-        Ok(state
-            .source
-            .as_ref()
-            .ok_or(AndroidBridgeError::InternalState("video handle is closed"))?
-            .len())
+        Ok(video.broker.len())
     }
 
     pub fn read_at(
@@ -307,62 +299,64 @@ impl AndroidEngine {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, AndroidBridgeError> {
+        self.validate_read_length(length)?;
+        let video = self.videos.get(handle)?;
+        self.runtime
+            .block_on(video.broker.read(offset, length))
+            .map_err(map_broker_error)
+    }
+
+    /// Queues optional speculative I/O. Any foreground `read_at`, seek, or close preempts it.
+    pub fn prefetch(
+        &self,
+        handle: VideoHandle,
+        offset: u64,
+        length: usize,
+    ) -> Result<(), AndroidBridgeError> {
+        self.validate_read_length(length)?;
+        let video = self.videos.get(handle)?;
+        self.runtime
+            .block_on(video.broker.prefetch(offset, length))
+            .map_err(map_broker_error)
+    }
+
+    /// Advances the playback generation immediately without waiting for the broker runner.
+    ///
+    /// A concurrent foreground READ emits SMB2 CANCEL, while speculative prefetch/reconnect/backoff
+    /// work is independently invalidated so a player seek does not wait behind background I/O.
+    pub fn seek(&self, handle: VideoHandle) -> Result<u64, AndroidBridgeError> {
+        let video = self.videos.get(handle)?;
+        Ok(video.broker.seek())
+    }
+
+    pub fn close_video(&self, handle: VideoHandle) -> Result<CloseInfo, AndroidBridgeError> {
+        let video = self.videos.remove(handle)?;
+        self.runtime
+            .block_on(video.broker.close())
+            .map_err(map_broker_error)
+    }
+
+    fn validate_read_length(&self, length: usize) -> Result<(), AndroidBridgeError> {
         if length > self.max_read_bytes {
             return Err(AndroidBridgeError::ReadTooLarge {
                 requested: length,
                 maximum: self.max_read_bytes,
             });
         }
-
-        let video = self.videos.get(handle)?;
-        let generation = video.cancellation.generation();
-        let mut state = lock(&video.state)?;
-        let VideoState { source, reader } = &mut *state;
-        let source = source
-            .as_mut()
-            .ok_or(AndroidBridgeError::InternalState("video handle is closed"))?;
-
-        self.runtime
-            .block_on(reader.read_recovering_cancelable(
-                source,
-                offset,
-                length,
-                &video.cancellation,
-                generation,
-            ))
-            .map_err(AndroidBridgeError::Stream)
-    }
-
-    /// Advances the generation immediately without taking the session I/O mutex.
-    ///
-    /// A concurrent `read_at` can therefore send SMB2 CANCEL, abort a reconnect handshake, or
-    /// interrupt reconnect backoff while this method returns promptly to a player thread.
-    pub fn seek(&self, handle: VideoHandle) -> Result<u64, AndroidBridgeError> {
-        let video = self.videos.get(handle)?;
-        Ok(video.cancellation.advance())
-    }
-
-    pub fn close_video(&self, handle: VideoHandle) -> Result<CloseInfo, AndroidBridgeError> {
-        let video = self.videos.remove(handle)?;
-        video.cancellation.advance();
-        let mut state = lock(&video.state)?;
-        let source = state
-            .source
-            .take()
-            .ok_or(AndroidBridgeError::InternalState(
-                "video handle is already closed",
-            ))?;
-        self.runtime
-            .block_on(source.close())
-            .map_err(AndroidBridgeError::Client)
+        Ok(())
     }
 }
 
-fn map_reconnect_error(error: ReconnectError) -> AndroidBridgeError {
+fn map_broker_error(error: BrokerError) -> AndroidBridgeError {
     match error {
-        ReconnectError::Client(error) => AndroidBridgeError::Client(error),
-        ReconnectError::Cancelled => cancelled_bridge_error(),
-        ReconnectError::RandomSource => AndroidBridgeError::RandomSource,
+        BrokerError::Stream(StreamError::Reconnect(ReconnectError::RandomSource)) => {
+            AndroidBridgeError::RandomSource
+        }
+        BrokerError::Stream(StreamError::Reconnect(ReconnectError::Cancelled))
+        | BrokerError::StaleGeneration => cancelled_bridge_error(),
+        BrokerError::Stream(error) => AndroidBridgeError::Stream(error),
+        BrokerError::Closed => AndroidBridgeError::InternalState("video broker is closed"),
+        BrokerError::InvalidConfig(message) => AndroidBridgeError::InvalidConfig(message),
     }
 }
 
@@ -461,6 +455,14 @@ mod tests {
         })
         .unwrap();
         assert_eq!(engine.reconnect_policy.max_connect_attempts, 0);
+    }
+
+    #[test]
+    fn stale_broker_generation_maps_to_cancellation() {
+        assert!(matches!(
+            map_broker_error(BrokerError::StaleGeneration),
+            AndroidBridgeError::Stream(StreamError::Client(ClientError::Cancelled))
+        ));
     }
 
     #[test]
