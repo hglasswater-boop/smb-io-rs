@@ -48,7 +48,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    let data = reader.read_recovering(&mut source, 0, PROBE_READ_LEN).await?;
+    let data = reader
+        .read_recovering(&mut source, 0, PROBE_READ_LEN)
+        .await?;
     if data.len() != PROBE_READ_LEN {
         return Err(format!(
             "adaptive probe read was short: expected {PROBE_READ_LEN} bytes, got {}",
@@ -70,7 +72,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("adaptive_bootstrap_bytes: {bootstrap}");
-    println!("adaptive_foreground_fetches: {}", metrics.foreground_fetches);
+    println!(
+        "adaptive_foreground_fetches: {}",
+        metrics.foreground_fetches
+    );
     println!(
         "adaptive_foreground_fetch_bytes: {}",
         metrics.foreground_fetch_bytes
@@ -84,14 +89,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" {
-        String::new()
-    } else {
-        value
-    }
+    if value == "-" { String::new() } else { value }
 }
 
 fn usage() -> String {
-    "usage: adaptive_read_ahead <host> <port> <share> <path> <username|-> <password|->"
-        .to_string()
+    "usage: adaptive_read_ahead <host> <port> <share> <path> <username|-> <password|->".to_string()
 }
