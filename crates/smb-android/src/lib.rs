@@ -10,5 +10,5 @@ pub use engine::{
     AndroidBridgeError, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest,
 };
 
-/// Marker for the first Android bridge API generation.
-pub const API_VERSION: u32 = 1;
+/// Android bridge API generation that includes the non-blocking video prefetch entry point.
+pub const API_VERSION: u32 = 2;
