@@ -122,7 +122,7 @@ where
                 let phase =
                     async_state.validate(file.tree_id(), self.session_id, message_id, &header)?;
                 self.connection.grant_credits(header.credits)?;
-                self.verify_read_response(&mut response_message, &header)?;
+                self.verify_read_response(&mut response_message, &header, phase)?;
                 if phase == ReadResponsePhase::InterimPending {
                     continue;
                 }
@@ -303,7 +303,7 @@ where
                     &header,
                 )?;
                 self.connection.grant_credits(header.credits)?;
-                self.verify_read_response(&mut response_message, &header)?;
+                self.verify_read_response(&mut response_message, &header, phase)?;
                 if phase == ReadResponsePhase::InterimPending {
                     continue;
                 }
@@ -401,19 +401,27 @@ where
         &self,
         message: &mut [u8],
         header: &Smb2Header,
+        phase: ReadResponsePhase,
     ) -> Result<(), ClientError> {
         if header.flags & flags::SIGNED != 0 {
             let signing = self.signing.as_ref().ok_or(ClientError::Protocol(
                 "server signed READ without an available signing key",
             ))?;
             signing.verify(message)?;
-        } else if self.signing_required {
+        } else if read_response_requires_signature(self.signing_required, phase) {
             return Err(ClientError::Protocol(
                 "server omitted a required READ signature",
             ));
         }
         Ok(())
     }
+}
+
+fn read_response_requires_signature(
+    signing_required: bool,
+    phase: ReadResponsePhase,
+) -> bool {
+    signing_required && phase == ReadResponsePhase::Final
 }
 
 fn read_target_len(file: &FileHandle, offset: u64, length: usize) -> Result<usize, ClientError> {
@@ -456,5 +464,25 @@ mod tests {
     #[test]
     fn legacy_read_uses_zero_credit_charge() {
         assert_eq!(read_credit_charge(false, 64 * 1024).unwrap(), 0);
+    }
+
+    #[test]
+    fn unsigned_async_interim_response_is_allowed_when_signing_is_required() {
+        assert!(!read_response_requires_signature(
+            true,
+            ReadResponsePhase::InterimPending
+        ));
+    }
+
+    #[test]
+    fn final_response_still_requires_signature_when_signing_is_required() {
+        assert!(read_response_requires_signature(
+            true,
+            ReadResponsePhase::Final
+        ));
+        assert!(!read_response_requires_signature(
+            false,
+            ReadResponsePhase::Final
+        ));
     }
 }
