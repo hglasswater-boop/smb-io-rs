@@ -11,6 +11,15 @@ pub(crate) enum ReadResponsePhase {
     Final,
 }
 
+impl ReadResponsePhase {
+    /// SMB2 async STATUS_PENDING is an interim response. Servers are permitted to leave that
+    /// response unsigned even when the session requires signing; final responses remain subject to
+    /// the normal signing requirement.
+    pub(crate) fn requires_signature(self, signing_required: bool) -> bool {
+        signing_required && self == Self::Final
+    }
+}
+
 /// Per-request asynchronous state learned from SMB2_FLAGS_ASYNC_COMMAND responses.
 ///
 /// The MessageId remains the primary correlation key. Once the server supplies a nonzero AsyncId,
@@ -232,5 +241,12 @@ mod tests {
                 .validate(TREE_ID, SESSION_ID, MESSAGE_ID, &final_response)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn unsigned_interim_is_allowed_but_final_still_requires_signing() {
+        assert!(!ReadResponsePhase::InterimPending.requires_signature(true));
+        assert!(ReadResponsePhase::Final.requires_signature(true));
+        assert!(!ReadResponsePhase::Final.requires_signature(false));
     }
 }
