@@ -1,0 +1,414 @@
+name: Rolling Cache Once
+
+on:
+  push:
+    branches:
+      - feature/rolling-video-cache
+    paths:
+      - '.github/workflows/rolling-cache-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/rolling-video-cache
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply rolling-cache and auto-refill patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, got {count}")
+              return text.replace(old, new, 1)
+
+          video_path = Path('crates/smb-stream/src/video.rs')
+          video = video_path.read_text()
+
+          video = replace_once(
+              video,
+              '''struct PrefetchExtension {
+              offset: u64,
+              fetch_len: usize,
+              reader_generation: u64,
+              expected_cache_start: u64,
+              expected_cache_len: usize,
+          }
+          ''',
+              '''struct PrefetchExtension {
+              offset: u64,
+              fetch_len: usize,
+              reader_generation: u64,
+              expected_cache_start: u64,
+              expected_cache_len: usize,
+              drop_prefix: usize,
+          }
+          ''',
+              'prefetch plan fields',
+          )
+
+          marker = '''    /// Explicitly moves the logical playback head and invalidates stale read-ahead data.
+          '''
+          insert = '''    /// Returns a low-water speculative refill hint for the current sequential cursor.
+              ///
+              /// The broker uses this after delivering a foreground read. No network I/O happens here.
+              pub(crate) fn automatic_prefetch_hint(
+                  &self,
+                  file_len: u64,
+              ) -> Result<Option<(u64, usize)>, StreamError> {
+                  let Some(cursor) = self.last_request_end else {
+                      return Ok(None);
+                  };
+                  if cursor >= file_len {
+                      return Ok(None);
+                  }
+                  let Some(cache) = self.cache.as_ref() else {
+                      return Ok(None);
+                  };
+                  if cache.generation != self.generation {
+                      return Ok(None);
+                  }
+
+                  let cache_end = cache.end()?;
+                  if cursor < cache.start || cursor > cache_end {
+                      return Ok(None);
+                  }
+                  let ahead = usize::try_from(cache_end - cursor).unwrap_or(usize::MAX);
+                  let low_water = (self.config.read_ahead_bytes / 2).max(1);
+                  if ahead > low_water {
+                      return Ok(None);
+                  }
+                  Ok(Some((cursor, self.config.read_ahead_bytes)))
+              }
+
+          '''
+          video = replace_once(video, marker, insert + marker, 'automatic prefetch hint insertion')
+
+          start = video.index('    fn prepare_prefetch_extension(')
+          end = video.index('    fn finish_fetch(', start)
+          video = video[:start] + '''    fn prepare_prefetch_extension(
+              &self,
+              file_len: u64,
+              hint_offset: u64,
+              hint_length: usize,
+              cancellation: Option<(&ReadCancellationToken, u64)>,
+          ) -> Result<Option<PrefetchExtension>, StreamError> {
+              ensure_not_cancelled(cancellation)?;
+              if hint_length == 0 || hint_offset >= file_len {
+                  return Ok(None);
+              }
+
+              let Some(cache) = self.cache.as_ref() else {
+                  return Ok(None);
+              };
+              if cache.generation != self.generation {
+                  return Ok(None);
+              }
+
+              let cache_end = cache.end()?;
+              if hint_offset < cache.start || hint_offset > cache_end || cache_end >= file_len {
+                  return Ok(None);
+              }
+
+              // Keep one read-ahead window behind the playback cursor. The prefix is only dropped
+              // after the speculative fetch succeeds, so cancellation/failure cannot damage cache.
+              let retain_back = u64::try_from(
+                  self.config.read_ahead_bytes.min(self.config.max_cache_bytes),
+              )
+              .map_err(|_| StreamError::OffsetOverflow)?;
+              let keep_from = hint_offset.saturating_sub(retain_back).max(cache.start);
+              let drop_prefix = usize::try_from(keep_from - cache.start)
+                  .map_err(|_| StreamError::OffsetOverflow)?;
+              let retained_len = cache
+                  .data
+                  .len()
+                  .checked_sub(drop_prefix)
+                  .ok_or(StreamError::OffsetOverflow)?;
+              let available_capacity = self
+                  .config
+                  .max_cache_bytes
+                  .checked_sub(retained_len)
+                  .ok_or(StreamError::OffsetOverflow)?;
+              if available_capacity == 0 {
+                  return Ok(None);
+              }
+
+              let file_remaining = usize::try_from(file_len - cache_end).unwrap_or(usize::MAX);
+              let fetch_len = self
+                  .config
+                  .read_ahead_bytes
+                  .min(available_capacity)
+                  .min(file_remaining);
+              if fetch_len == 0 {
+                  return Ok(None);
+              }
+
+              Ok(Some(PrefetchExtension {
+                  offset: cache_end,
+                  fetch_len,
+                  reader_generation: self.generation,
+                  expected_cache_start: cache.start,
+                  expected_cache_len: cache.data.len(),
+                  drop_prefix,
+              }))
+          }
+
+          ''' + video[end:]
+
+          start = video.index('    fn finish_prefetch_extension(')
+          end = video.index('    fn is_seek_miss(', start)
+          video = video[:start] + '''    fn finish_prefetch_extension(
+              &mut self,
+              plan: PrefetchExtension,
+              fetched: Vec<u8>,
+              cancellation: Option<(&ReadCancellationToken, u64)>,
+          ) -> Result<usize, StreamError> {
+              ensure_not_cancelled(cancellation)?;
+              if plan.reader_generation != self.generation {
+                  return Ok(0);
+              }
+
+              let Some(cache) = self.cache.as_mut() else {
+                  return Ok(0);
+              };
+              if cache.generation != plan.reader_generation
+                  || cache.start != plan.expected_cache_start
+                  || cache.data.len() != plan.expected_cache_len
+                  || cache.end()? != plan.offset
+                  || plan.drop_prefix > cache.data.len()
+              {
+                  return Ok(0);
+              }
+
+              if plan.drop_prefix > 0 {
+                  let dropped = u64::try_from(plan.drop_prefix)
+                      .map_err(|_| StreamError::OffsetOverflow)?;
+                  cache.data.drain(..plan.drop_prefix);
+                  cache.start = cache
+                      .start
+                      .checked_add(dropped)
+                      .ok_or(StreamError::OffsetOverflow)?;
+              }
+
+              let capacity = self.config.max_cache_bytes - cache.data.len();
+              let append_len = fetched.len().min(capacity);
+              cache.data.extend_from_slice(&fetched[..append_len]);
+              Ok(append_len)
+          }
+
+          ''' + video[end:]
+
+          test_marker = '''    #[test]
+              fn stale_prefetch_plan_never_appends() {
+          '''
+          extra_tests = '''    #[test]
+              fn automatic_prefetch_starts_at_low_water_mark() {
+                  let config = VideoReaderConfig {
+                      read_ahead_bytes: 8,
+                      max_cache_bytes: 32,
+                      ..VideoReaderConfig::default()
+                  };
+                  let mut reader = VideoReader::new(config).unwrap();
+                  reader.cache = Some(CachedWindow {
+                      generation: 0,
+                      start: 100,
+                      data: vec![1; 16],
+                  });
+
+                  reader.last_request_end = Some(108);
+                  assert_eq!(reader.automatic_prefetch_hint(1_000).unwrap(), None);
+                  reader.last_request_end = Some(112);
+                  assert_eq!(
+                      reader.automatic_prefetch_hint(1_000).unwrap(),
+                      Some((112, 8))
+                  );
+              }
+
+              #[test]
+              fn successful_prefetch_rolls_full_cache_forward() {
+                  let config = VideoReaderConfig {
+                      read_ahead_bytes: 4,
+                      max_cache_bytes: 12,
+                      ..VideoReaderConfig::default()
+                  };
+                  let mut reader = VideoReader::new(config).unwrap();
+                  reader.cache = Some(CachedWindow {
+                      generation: 0,
+                      start: 100,
+                      data: (0u8..12).collect(),
+                  });
+                  reader.last_request_end = Some(110);
+
+                  let plan = reader
+                      .prepare_prefetch_extension(1_000, 110, 1, None)
+                      .unwrap()
+                      .unwrap();
+                  assert_eq!(plan.offset, 112);
+                  assert_eq!(plan.fetch_len, 4);
+                  assert_eq!(plan.drop_prefix, 6);
+
+                  assert_eq!(
+                      reader
+                          .finish_prefetch_extension(plan, vec![12, 13, 14, 15], None)
+                          .unwrap(),
+                      4
+                  );
+                  assert_eq!(reader.cached_range().unwrap(), Some((106, 116)));
+                  assert_eq!(reader.cached_bytes(), 10);
+                  assert_eq!(reader.last_request_end, Some(110));
+              }
+
+          '''
+          video = replace_once(video, test_marker, extra_tests + test_marker, 'rolling cache tests')
+          video_path.write_text(video)
+
+          broker_path = Path('crates/smb-stream/src/broker.rs')
+          broker = broker_path.read_text()
+          broker = replace_once(
+              broker,
+              '''    Read {
+                  generation: u64,
+                  offset: u64,
+          ''',
+              '''    Read {
+                  generation: u64,
+                  prefetch_generation: u64,
+                  offset: u64,
+          ''',
+              'interactive read generation',
+          )
+          broker = replace_once(
+              broker,
+              '''    pub async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, BrokerError> {
+                  self.prefetch_cancellation.advance();
+                  let generation = self.cancellation.generation();
+          ''',
+              '''    pub async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, BrokerError> {
+                  let prefetch_generation = self.prefetch_cancellation.advance();
+                  let generation = self.cancellation.generation();
+          ''',
+              'read prefetch generation capture',
+          )
+          broker = replace_once(
+              broker,
+              '''            .send(InteractiveCommand::Read {
+                      generation,
+                      offset,
+          ''',
+              '''            .send(InteractiveCommand::Read {
+                      generation,
+                      prefetch_generation,
+                      offset,
+          ''',
+              'read command field',
+          )
+          broker = replace_once(
+              broker,
+              '''    background_command: watch::Receiver<Option<PrefetchCommand>>,
+              source: Option<BrokerSource<T>>,
+          ''',
+              '''    background_command: watch::Receiver<Option<PrefetchCommand>>,
+              source: Option<BrokerSource<T>>,
+              file_len: u64,
+          ''',
+              'runner file length',
+          )
+          broker = replace_once(
+              broker,
+              '''                SelectedCommand::Interactive(Some(InteractiveCommand::Read {
+                      generation,
+                      offset,
+                      length,
+                      reply,
+                  })) => {
+                      let result = self.process_read(generation, offset, length).await;
+                      let _ = reply.send(result);
+                  }
+          ''',
+              '''                SelectedCommand::Interactive(Some(InteractiveCommand::Read {
+                      generation,
+                      prefetch_generation,
+                      offset,
+                      length,
+                      reply,
+                  })) => {
+                      let result = self.process_read(generation, offset, length).await;
+                      let auto_prefetch = if result.is_ok() {
+                          self.automatic_prefetch_command(generation, prefetch_generation)
+                      } else {
+                          None
+                      };
+                      let _ = reply.send(result);
+                      if let Some(command) = auto_prefetch {
+                          let _ = self.process_prefetch(command).await;
+                      }
+                  }
+          ''',
+              'interactive read dispatch',
+          )
+          marker = '''    async fn process_read(
+          '''
+          insert = '''    fn automatic_prefetch_command(
+                  &self,
+                  playback_generation: u64,
+                  prefetch_generation: u64,
+              ) -> Option<PrefetchCommand> {
+                  if !self.cancellation.is_current(playback_generation)
+                      || !self
+                          .prefetch_cancellation
+                          .is_current(prefetch_generation)
+                  {
+                      return None;
+                  }
+                  let (offset, length) = self
+                      .reader
+                      .automatic_prefetch_hint(self.file_len)
+                      .ok()??;
+                  Some(PrefetchCommand {
+                      playback_generation,
+                      prefetch_generation,
+                      offset,
+                      length,
+                  })
+              }
+
+          '''
+          broker = replace_once(broker, marker, insert + marker, 'automatic broker prefetch insertion')
+          broker = replace_once(
+              broker,
+              '''        source: Some(source),
+                  reader,
+                  active_generation: 0,
+          ''',
+              '''        source: Some(source),
+                  file_len,
+                  reader,
+                  active_generation: 0,
+          ''',
+              'runner file length initialization',
+          )
+          broker_path.write_text(broker)
+          PY
+      - name: Format
+        run: cargo fmt --all
+      - name: Validate stream and Android bridge
+        run: |
+          cargo test -p smb-io-stream
+          cargo check -p smb-io-android
+      - name: Commit implementation and remove one-shot workflow
+        run: |
+          rm .github/workflows/rolling-cache-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(stream): roll and auto-refill video cache"
+          git push
