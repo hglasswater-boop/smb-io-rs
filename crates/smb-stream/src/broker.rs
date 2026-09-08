@@ -191,6 +191,7 @@ pub struct VideoBrokerRunner<T> {
     prefetch_cancellation: ReadCancellationToken,
     interactive_commands: mpsc::Receiver<InteractiveCommand>,
     background_command: watch::Receiver<Option<PrefetchCommand>>,
+    background_sender: watch::Sender<Option<PrefetchCommand>>,
     source: Option<BrokerSource<T>>,
     file_len: u64,
     reader: VideoReader,
@@ -237,7 +238,7 @@ where
                     };
                     let _ = reply.send(result);
                     if let Some(command) = auto_prefetch {
-                        let _ = self.process_prefetch(command).await;
+                        self.background_sender.send_replace(Some(command));
                     }
                 }
                 SelectedCommand::Interactive(Some(InteractiveCommand::Shutdown { reply })) => {
@@ -514,7 +515,7 @@ fn broker_from_source<T>(
         cancellation: cancellation.clone(),
         prefetch_cancellation: prefetch_cancellation.clone(),
         interactive_commands: interactive_tx,
-        background_command: background_tx,
+        background_command: background_tx.clone(),
         file_len,
     };
     let runner = VideoBrokerRunner {
@@ -522,6 +523,7 @@ fn broker_from_source<T>(
         prefetch_cancellation,
         interactive_commands: interactive_rx,
         background_command: background_rx,
+        background_sender: background_tx,
         source: Some(source),
         file_len,
         reader,
