@@ -42,7 +42,7 @@ pub use reconnect::{
     STATUS_NETWORK_SESSION_EXPIRED, STATUS_USER_SESSION_DELETED, connect_read_only_file,
     connect_read_only_file_cancelable, is_retryable_client_error,
 };
-pub use recovering_read::RecoveringReadOnlyFile;
+pub use recovering_read::{ReadReconnectPolicy, RecoveringReadOnlyFile};
 pub use session::{
     STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
 };
