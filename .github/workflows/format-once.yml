@@ -2,6 +2,12 @@ name: Format Once
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/prefetch-cache-extension
+    paths:
+      - '.github/workflows/format-once.yml'
+      - 'crates/**/*.rs'
 
 permissions:
   contents: write
@@ -12,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: feature/prefetch-cache-extension
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
