@@ -1,0 +1,39 @@
+name: Adaptive Throughput EWMA Once
+
+on:
+  push:
+    branches:
+      - feature/adaptive-throughput-ewma
+    paths:
+      - '.github/workflows/adaptive-throughput-ewma-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/adaptive-throughput-ewma
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply EWMA patch
+        run: python3 tools/apply_adaptive_throughput_ewma.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Validate workspace
+        run: |
+          cargo test -p smb-io-stream
+          cargo check --workspace --all-targets
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/smb-stream/src/video.rs
+          git diff --cached --quiet && exit 1
+          git commit -m "perf(stream): smooth adaptive throughput with EWMA"
+          git push
