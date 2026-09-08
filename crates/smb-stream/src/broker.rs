@@ -2,8 +2,8 @@ use std::error::Error;
 use std::fmt;
 
 use smb_io_client::{
-    FileHandle, ReadCancellationToken, ReadOnlyReconnectRecipe, RecoveringReadOnlyFile,
-    SessionConnection, TcpTransport, Transport,
+    CloseInfo, CloseOptions, FileHandle, ReadCancellationToken, ReadOnlyReconnectRecipe,
+    ReadReconnectPolicy, RecoveringReadOnlyFile, SessionConnection, TcpTransport, Transport,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -60,30 +60,37 @@ impl From<StreamError> for BrokerError {
     }
 }
 
-enum BrokerCommand {
+enum InteractiveCommand {
     Read {
         generation: u64,
         offset: u64,
         length: usize,
         reply: oneshot::Sender<Result<Vec<u8>, BrokerError>>,
     },
-    Prefetch {
-        generation: u64,
-        offset: u64,
-        length: usize,
+    Shutdown {
+        reply: oneshot::Sender<Result<CloseInfo, BrokerError>>,
     },
-    Shutdown,
+}
+
+struct PrefetchCommand {
+    playback_generation: u64,
+    prefetch_generation: u64,
+    offset: u64,
+    length: usize,
 }
 
 /// Cheap cloneable control surface used by a player, JNI adapter, or FFmpeg bridge.
 ///
-/// `seek()` advances the cancellation generation synchronously. A blocked network READ notices the
-/// change, emits SMB2 CANCEL for its outstanding requests, drains their target responses, and then
-/// returns control to the broker without admitting stale data into the cache.
+/// Foreground reads and control operations use a dedicated high-priority queue. Starting a
+/// foreground read also invalidates the speculative-I/O generation, which causes an in-flight
+/// prefetch READ, reconnect, or reconnect backoff to stop before the foreground request is run.
 #[derive(Clone)]
 pub struct VideoBrokerHandle {
     cancellation: ReadCancellationToken,
-    commands: mpsc::Sender<BrokerCommand>,
+    prefetch_cancellation: ReadCancellationToken,
+    interactive_commands: mpsc::Sender<InteractiveCommand>,
+    background_commands: mpsc::Sender<PrefetchCommand>,
+    file_len: u64,
 }
 
 impl VideoBrokerHandle {
@@ -91,16 +98,26 @@ impl VideoBrokerHandle {
         self.cancellation.generation()
     }
 
+    pub fn len(&self) -> u64 {
+        self.file_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.file_len == 0
+    }
+
     /// Invalidates all work issued under the previous logical playback position.
     pub fn seek(&self) -> u64 {
+        self.prefetch_cancellation.advance();
         self.cancellation.advance()
     }
 
     pub async fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, BrokerError> {
+        self.prefetch_cancellation.advance();
         let generation = self.cancellation.generation();
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.commands
-            .send(BrokerCommand::Read {
+        self.interactive_commands
+            .send(InteractiveCommand::Read {
                 generation,
                 offset,
                 length,
@@ -111,15 +128,16 @@ impl VideoBrokerHandle {
         reply_rx.await.map_err(|_| BrokerError::Closed)?
     }
 
-    /// Queues speculative data for the current generation.
+    /// Queues speculative data for the current playback and prefetch generations.
     ///
     /// Network or decode failures are intentionally not returned to the caller because prefetch is
-    /// optional. Interactive `read()` calls still surface their errors normally.
+    /// optional. Any later foreground read invalidates this command before it can compete for the
+    /// SMB connection.
     pub async fn prefetch(&self, offset: u64, length: usize) -> Result<(), BrokerError> {
-        let generation = self.cancellation.generation();
-        self.commands
-            .send(BrokerCommand::Prefetch {
-                generation,
+        self.background_commands
+            .send(PrefetchCommand {
+                playback_generation: self.cancellation.generation(),
+                prefetch_generation: self.prefetch_cancellation.generation(),
                 offset,
                 length,
             })
@@ -127,11 +145,22 @@ impl VideoBrokerHandle {
             .map_err(|_| BrokerError::Closed)
     }
 
-    pub async fn shutdown(&self) -> Result<(), BrokerError> {
-        self.commands
-            .send(BrokerCommand::Shutdown)
+    /// Gracefully stops the broker and sends one SMB CLOSE for the current file handle.
+    ///
+    /// CLOSE is never replayed after an ambiguous transport failure.
+    pub async fn close(&self) -> Result<CloseInfo, BrokerError> {
+        self.prefetch_cancellation.advance();
+        self.cancellation.advance();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.interactive_commands
+            .send(InteractiveCommand::Shutdown { reply: reply_tx })
             .await
-            .map_err(|_| BrokerError::Closed)
+            .map_err(|_| BrokerError::Closed)?;
+        reply_rx.await.map_err(|_| BrokerError::Closed)?
+    }
+
+    pub async fn shutdown(&self) -> Result<(), BrokerError> {
+        self.close().await.map(|_| ())
     }
 }
 
@@ -150,10 +179,13 @@ enum BrokerSource<T> {
 /// The runner is deliberately returned as a future-owning object instead of internally calling
 /// `tokio::spawn`. This keeps the crate compatible with runtimes that want to place SMB I/O on a
 /// dedicated task or LocalSet, while Android can simply run it on its native Tokio runtime.
+/// Foreground commands are selected before ready background-prefetch commands.
 pub struct VideoBrokerRunner<T> {
     cancellation: ReadCancellationToken,
-    commands: mpsc::Receiver<BrokerCommand>,
-    source: BrokerSource<T>,
+    prefetch_cancellation: ReadCancellationToken,
+    interactive_commands: mpsc::Receiver<InteractiveCommand>,
+    background_commands: mpsc::Receiver<PrefetchCommand>,
+    source: Option<BrokerSource<T>>,
     reader: VideoReader,
     active_generation: u64,
 }
@@ -163,25 +195,45 @@ where
     T: Transport,
 {
     pub async fn run(mut self) {
-        while let Some(command) = self.commands.recv().await {
-            match command {
-                BrokerCommand::Read {
+        enum SelectedCommand {
+            Interactive(Option<InteractiveCommand>),
+            Background(Option<PrefetchCommand>),
+        }
+
+        let mut interactive_open = true;
+        let mut background_open = true;
+
+        while interactive_open || background_open {
+            let selected = tokio::select! {
+                biased;
+                command = self.interactive_commands.recv(), if interactive_open => {
+                    SelectedCommand::Interactive(command)
+                }
+                command = self.background_commands.recv(), if background_open => {
+                    SelectedCommand::Background(command)
+                }
+            };
+
+            match selected {
+                SelectedCommand::Interactive(Some(InteractiveCommand::Read {
                     generation,
                     offset,
                     length,
                     reply,
-                } => {
+                })) => {
                     let result = self.process_read(generation, offset, length).await;
                     let _ = reply.send(result);
                 }
-                BrokerCommand::Prefetch {
-                    generation,
-                    offset,
-                    length,
-                } => {
-                    let _ = self.process_prefetch(generation, offset, length).await;
+                SelectedCommand::Interactive(Some(InteractiveCommand::Shutdown { reply })) => {
+                    let result = self.close_source().await;
+                    let _ = reply.send(result);
+                    break;
                 }
-                BrokerCommand::Shutdown => break,
+                SelectedCommand::Interactive(None) => interactive_open = false,
+                SelectedCommand::Background(Some(command)) => {
+                    let _ = self.process_prefetch(command).await;
+                }
+                SelectedCommand::Background(None) => background_open = false,
             }
         }
     }
@@ -199,11 +251,13 @@ where
 
     async fn read_source(
         &mut self,
-        generation: u64,
         offset: u64,
         length: usize,
-    ) -> Result<Vec<u8>, StreamError> {
-        match &mut self.source {
+        cancellation: &ReadCancellationToken,
+        generation: u64,
+    ) -> Result<Vec<u8>, BrokerError> {
+        let source = self.source.as_mut().ok_or(BrokerError::Closed)?;
+        match source {
             BrokerSource::Direct(source) => {
                 let source = source.as_mut();
                 self.reader
@@ -212,22 +266,23 @@ where
                         &source.file,
                         offset,
                         length,
-                        &self.cancellation,
+                        cancellation,
                         generation,
                     )
                     .await
+                    .map_err(BrokerError::Stream)
             }
-            BrokerSource::Recovering(source) => {
-                self.reader
-                    .read_recovering_cancelable(
-                        source.as_mut(),
-                        offset,
-                        length,
-                        &self.cancellation,
-                        generation,
-                    )
-                    .await
-            }
+            BrokerSource::Recovering(source) => self
+                .reader
+                .read_recovering_cancelable(
+                    source.as_mut(),
+                    offset,
+                    length,
+                    cancellation,
+                    generation,
+                )
+                .await
+                .map_err(BrokerError::Stream),
         }
     }
 
@@ -238,7 +293,10 @@ where
         length: usize,
     ) -> Result<Vec<u8>, BrokerError> {
         self.prepare_generation(generation, offset)?;
-        let result = self.read_source(generation, offset, length).await;
+        let cancellation = self.cancellation.clone();
+        let result = self
+            .read_source(offset, length, &cancellation, generation)
+            .await;
 
         match result {
             Ok(data) if self.cancellation.is_current(generation) => Ok(data),
@@ -246,34 +304,66 @@ where
                 self.reader.invalidate();
                 Err(BrokerError::StaleGeneration)
             }
-            Err(error) if error.is_cancelled() => {
+            Err(BrokerError::Stream(error)) if error.is_cancelled() => {
                 self.reader.invalidate();
                 Err(BrokerError::StaleGeneration)
             }
-            Err(error) => Err(BrokerError::Stream(error)),
+            Err(error) => Err(error),
         }
     }
 
-    async fn process_prefetch(
-        &mut self,
-        generation: u64,
-        offset: u64,
-        length: usize,
-    ) -> Result<(), BrokerError> {
-        self.prepare_generation(generation, offset)?;
-        let result = self.read_source(generation, offset, length).await;
+    async fn process_prefetch(&mut self, command: PrefetchCommand) -> Result<(), BrokerError> {
+        if !self
+            .prefetch_cancellation
+            .is_current(command.prefetch_generation)
+        {
+            return Err(BrokerError::StaleGeneration);
+        }
+        self.prepare_generation(command.playback_generation, command.offset)?;
+
+        let cancellation = self.prefetch_cancellation.clone();
+        let result = self
+            .read_source(
+                command.offset,
+                command.length,
+                &cancellation,
+                command.prefetch_generation,
+            )
+            .await;
 
         match result {
-            Ok(_) if self.cancellation.is_current(generation) => Ok(()),
-            Ok(_) => {
-                self.reader.invalidate();
+            Ok(_)
+                if self
+                    .cancellation
+                    .is_current(command.playback_generation)
+                    && self
+                        .prefetch_cancellation
+                        .is_current(command.prefetch_generation) =>
+            {
+                Ok(())
+            }
+            Ok(_) => Err(BrokerError::StaleGeneration),
+            Err(BrokerError::Stream(error)) if error.is_cancelled() => {
                 Err(BrokerError::StaleGeneration)
             }
-            Err(error) if error.is_cancelled() => {
-                self.reader.invalidate();
-                Err(BrokerError::StaleGeneration)
-            }
-            Err(error) => Err(BrokerError::Stream(error)),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn close_source(&mut self) -> Result<CloseInfo, BrokerError> {
+        let source = self.source.take().ok_or(BrokerError::Closed)?;
+        match source {
+            BrokerSource::Direct(mut source) => source
+                .session
+                .close_file(source.file, CloseOptions::default())
+                .await
+                .map_err(StreamError::from)
+                .map_err(BrokerError::Stream),
+            BrokerSource::Recovering(source) => source
+                .close()
+                .await
+                .map_err(StreamError::from)
+                .map_err(BrokerError::Stream),
         }
     }
 }
@@ -289,10 +379,12 @@ where
 {
     validate_queue_capacity(config.queue_capacity)?;
     let reader = VideoReader::new(config.reader)?;
+    let file_len = file.len();
     Ok(broker_from_source(
         BrokerSource::Direct(Box::new(DirectBrokerSource { session, file })),
         reader,
         config.queue_capacity,
+        file_len,
     ))
 }
 
@@ -302,15 +394,27 @@ pub async fn recovering_video_broker(
     recipe: ReadOnlyReconnectRecipe,
     config: VideoBrokerConfig,
 ) -> Result<(VideoBrokerHandle, VideoBrokerRunner<TcpTransport>), BrokerError> {
+    recovering_video_broker_with_policy(recipe, ReadReconnectPolicy::default(), config).await
+}
+
+/// Policy-aware recovering broker used by platform adapters that want bounded reconnect handshake
+/// retries without changing the one-READ-replay safety rule.
+pub async fn recovering_video_broker_with_policy(
+    recipe: ReadOnlyReconnectRecipe,
+    policy: ReadReconnectPolicy,
+    config: VideoBrokerConfig,
+) -> Result<(VideoBrokerHandle, VideoBrokerRunner<TcpTransport>), BrokerError> {
     validate_queue_capacity(config.queue_capacity)?;
     let reader = VideoReader::new(config.reader)?;
-    let source = RecoveringReadOnlyFile::connect(recipe)
+    let source = RecoveringReadOnlyFile::connect_with_policy(recipe, policy)
         .await
         .map_err(StreamError::from)?;
+    let file_len = source.len();
     Ok(broker_from_source::<TcpTransport>(
         BrokerSource::Recovering(Box::new(source)),
         reader,
         config.queue_capacity,
+        file_len,
     ))
 }
 
@@ -327,17 +431,25 @@ fn broker_from_source<T>(
     source: BrokerSource<T>,
     reader: VideoReader,
     queue_capacity: usize,
+    file_len: u64,
 ) -> (VideoBrokerHandle, VideoBrokerRunner<T>) {
     let cancellation = ReadCancellationToken::new();
-    let (commands_tx, commands_rx) = mpsc::channel(queue_capacity);
+    let prefetch_cancellation = ReadCancellationToken::new();
+    let (interactive_tx, interactive_rx) = mpsc::channel(queue_capacity);
+    let (background_tx, background_rx) = mpsc::channel(queue_capacity);
     let handle = VideoBrokerHandle {
         cancellation: cancellation.clone(),
-        commands: commands_tx,
+        prefetch_cancellation: prefetch_cancellation.clone(),
+        interactive_commands: interactive_tx,
+        background_commands: background_tx,
+        file_len,
     };
     let runner = VideoBrokerRunner {
         cancellation,
-        commands: commands_rx,
-        source,
+        prefetch_cancellation,
+        interactive_commands: interactive_rx,
+        background_commands: background_rx,
+        source: Some(source),
         reader,
         active_generation: 0,
     };
@@ -365,5 +477,34 @@ mod tests {
             validate_queue_capacity(0),
             Err(BrokerError::InvalidConfig(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn foreground_read_invalidates_prefetch_before_enqueue() {
+        let cancellation = ReadCancellationToken::new();
+        let prefetch_cancellation = ReadCancellationToken::new();
+        let old_prefetch_generation = prefetch_cancellation.generation();
+        let (interactive_tx, mut interactive_rx) = mpsc::channel(1);
+        let (background_tx, _background_rx) = mpsc::channel(1);
+        let handle = VideoBrokerHandle {
+            cancellation,
+            prefetch_cancellation: prefetch_cancellation.clone(),
+            interactive_commands: interactive_tx,
+            background_commands: background_tx,
+            file_len: 123,
+        };
+
+        let caller = tokio::spawn(async move { handle.read(4, 1).await });
+        let command = interactive_rx.recv().await.unwrap();
+        assert!(!prefetch_cancellation.is_current(old_prefetch_generation));
+
+        match command {
+            InteractiveCommand::Read { reply, .. } => {
+                reply.send(Ok(vec![7])).unwrap();
+            }
+            InteractiveCommand::Shutdown { .. } => panic!("unexpected shutdown command"),
+        }
+
+        assert_eq!(caller.await.unwrap().unwrap(), vec![7]);
     }
 }
