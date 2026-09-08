@@ -184,7 +184,7 @@ where
                     &header,
                 )?;
                 self.connection.grant_credits(header.credits)?;
-                verify_response(self, &mut response_message, &header)?;
+                verify_response(self, &mut response_message, &header, phase)?;
 
                 if phase == ReadResponsePhase::InterimPending {
                     if cancelled && !pending[position].async_cancel_sent {
@@ -350,13 +350,14 @@ fn verify_response<T>(
     session: &SessionConnection<T>,
     message: &mut [u8],
     header: &Smb2Header,
+    phase: ReadResponsePhase,
 ) -> Result<(), ClientError> {
     if header.flags & flags::SIGNED != 0 {
         let signing = session.signing.as_ref().ok_or(ClientError::Protocol(
             "server signed READ without an available signing key",
         ))?;
         signing.verify(message)?;
-    } else if session.signing_required {
+    } else if phase.requires_signature(session.signing_required) {
         return Err(ClientError::Protocol(
             "server omitted a required READ signature",
         ));
