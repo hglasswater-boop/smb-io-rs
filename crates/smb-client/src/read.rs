@@ -122,7 +122,7 @@ where
                 let phase =
                     async_state.validate(file.tree_id(), self.session_id, message_id, &header)?;
                 self.connection.grant_credits(header.credits)?;
-                self.verify_read_response(&mut response_message, &header)?;
+                self.verify_read_response(&mut response_message, &header, phase)?;
                 if phase == ReadResponsePhase::InterimPending {
                     continue;
                 }
@@ -303,7 +303,7 @@ where
                     &header,
                 )?;
                 self.connection.grant_credits(header.credits)?;
-                self.verify_read_response(&mut response_message, &header)?;
+                self.verify_read_response(&mut response_message, &header, phase)?;
                 if phase == ReadResponsePhase::InterimPending {
                     continue;
                 }
@@ -401,13 +401,14 @@ where
         &self,
         message: &mut [u8],
         header: &Smb2Header,
+        phase: ReadResponsePhase,
     ) -> Result<(), ClientError> {
         if header.flags & flags::SIGNED != 0 {
             let signing = self.signing.as_ref().ok_or(ClientError::Protocol(
                 "server signed READ without an available signing key",
             ))?;
             signing.verify(message)?;
-        } else if self.signing_required {
+        } else if phase.requires_signature(self.signing_required) {
             return Err(ClientError::Protocol(
                 "server omitted a required READ signature",
             ));

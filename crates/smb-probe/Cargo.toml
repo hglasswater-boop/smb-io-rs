@@ -12,7 +12,8 @@ getrandom = "0.4"
 smb-io-android = { path = "../smb-android" }
 smb-io-auth = { path = "../smb-auth" }
 smb-io-client = { path = "../smb-client" }
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+smb-io-stream = { path = "../smb-stream" }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

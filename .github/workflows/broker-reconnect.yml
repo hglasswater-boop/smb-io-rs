@@ -1,0 +1,155 @@
+name: Broker Reconnect
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/smb-client/**'
+      - 'crates/smb-stream/**'
+      - 'crates/smb-probe/**'
+      - '.github/workflows/broker-reconnect.yml'
+  pull_request:
+    paths:
+      - 'crates/smb-client/**'
+      - 'crates/smb-stream/**'
+      - 'crates/smb-probe/**'
+      - '.github/workflows/broker-reconnect.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  broker-reconnect:
+    name: Video broker survives Samba restart
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SMB_PORT: '1445'
+      SMB_USER: smbtest
+      SMB_PASSWORD: 'XFiles-Rust-SMB-42!'
+      SECOND_OFFSET: '6291456'
+      FIRST_HEX: '42524f4b45525f46495253545f4f4b'
+      SECOND_HEX: '42524f4b45525f5345434f4e445f4f4b'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Samba
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y samba
+          sudo systemctl stop smbd nmbd 2>/dev/null || true
+          sudo pkill smbd 2>/dev/null || true
+
+      - name: Create account and broker fixture
+        run: |
+          set -eux
+          sudo useradd --no-create-home --shell /usr/sbin/nologin "$SMB_USER" 2>/dev/null || true
+          printf '%s\n%s\n' "$SMB_PASSWORD" "$SMB_PASSWORD" | sudo smbpasswd -s -a "$SMB_USER"
+          sudo rm -rf /tmp/smb-io-broker
+          sudo mkdir -p /tmp/smb-io-broker
+          sudo truncate -s 8388608 /tmp/smb-io-broker/video.bin
+          printf 'BROKER_FIRST_OK' | sudo dd of=/tmp/smb-io-broker/video.bin bs=1 seek=0 conv=notrunc status=none
+          printf 'BROKER_SECOND_OK' | sudo dd of=/tmp/smb-io-broker/video.bin bs=1 seek="$SECOND_OFFSET" conv=notrunc status=none
+          sudo chown -R "$SMB_USER":"$SMB_USER" /tmp/smb-io-broker
+          sudo chmod -R a+rX /tmp/smb-io-broker
+
+      - name: Write signing-required SMB configuration
+        run: |
+          cat > /tmp/smb-io-broker.conf <<EOF
+          [global]
+            server role = standalone server
+            workgroup = WORKGROUP
+            security = user
+            map to guest = Never
+            server min protocol = SMB3_00
+            server max protocol = SMB3_11
+            server signing = mandatory
+            smb ports = ${SMB_PORT}
+            interfaces = 127.0.0.1
+            bind interfaces only = yes
+            disable netbios = yes
+            log level = 3
+            log file = /tmp/smb-io-broker.log
+
+          [media]
+            path = /tmp/smb-io-broker
+            read only = yes
+            guest ok = no
+            valid users = ${SMB_USER}
+          EOF
+
+      - name: Start Samba
+        run: |
+          sudo smbd -D -s /tmp/smb-io-broker.conf
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          sudo cat /tmp/smb-io-broker.log || true
+          exit 1
+
+      - name: Verify broker reconnect after Samba restart
+        run: |
+          set -euo pipefail
+          READY=/tmp/broker-reconnect-ready
+          RESUME=/tmp/broker-reconnect-resume
+          LOG=/tmp/broker-reconnect-probe.log
+          rm -f "$READY" "$RESUME" "$LOG"
+
+          cargo run -p smb-io-probe --example broker_reconnect -- \
+            127.0.0.1 "$SMB_PORT" media video.bin \
+            "$SMB_USER" "$SMB_PASSWORD" \
+            0 "$FIRST_HEX" \
+            "$SECOND_OFFSET" "$SECOND_HEX" \
+            "$READY" "$RESUME" \
+            >"$LOG" 2>&1 &
+          PROBE_PID=$!
+
+          for attempt in $(seq 1 120); do
+            if [ -f "$READY" ]; then
+              break
+            fi
+            if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+              cat "$LOG"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          test -f "$READY" || { cat "$LOG"; exit 1; }
+
+          sudo pkill smbd 2>/dev/null || true
+          for attempt in $(seq 1 40); do
+            if ! pgrep smbd >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          sudo rm -f /run/samba/smbd.pid
+          sudo smbd -D -s /tmp/smb-io-broker.conf
+          for attempt in $(seq 1 60); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null
+
+          touch "$RESUME"
+          if ! wait "$PROBE_PID"; then
+            cat "$LOG"
+            exit 1
+          fi
+          cat "$LOG"
+          grep -q '^broker_reconnect_ready: true$' "$LOG"
+          grep -q "^broker_reconnect_verified_offset: ${SECOND_OFFSET}$" "$LOG"
+          grep -q '^broker_reconnect_verified: true$' "$LOG"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          cat /tmp/broker-reconnect-probe.log 2>/dev/null || true
+          sudo cat /tmp/smb-io-broker.log 2>/dev/null || true

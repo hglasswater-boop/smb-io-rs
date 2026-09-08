@@ -1,7 +1,10 @@
 use std::error::Error;
 use std::fmt;
 
-use smb_io_client::{ClientError, FileHandle, ReadCancellationToken, SessionConnection, Transport};
+use smb_io_client::{
+    FileHandle, ReadCancellationToken, ReadOnlyReconnectRecipe, RecoveringReadOnlyFile,
+    SessionConnection, TcpTransport, Transport,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{StreamError, VideoReader, VideoReaderConfig};
@@ -132,7 +135,17 @@ impl VideoBrokerHandle {
     }
 }
 
-/// Owns one authenticated SMB session and one open video file.
+struct DirectBrokerSource<T> {
+    session: SessionConnection<T>,
+    file: FileHandle,
+}
+
+enum BrokerSource<T> {
+    Direct(Box<DirectBrokerSource<T>>),
+    Recovering(Box<RecoveringReadOnlyFile>),
+}
+
+/// Owns the SMB read source and video read-ahead/cache state.
 ///
 /// The runner is deliberately returned as a future-owning object instead of internally calling
 /// `tokio::spawn`. This keeps the crate compatible with runtimes that want to place SMB I/O on a
@@ -140,8 +153,7 @@ impl VideoBrokerHandle {
 pub struct VideoBrokerRunner<T> {
     cancellation: ReadCancellationToken,
     commands: mpsc::Receiver<BrokerCommand>,
-    session: SessionConnection<T>,
-    file: FileHandle,
+    source: BrokerSource<T>,
     reader: VideoReader,
     active_generation: u64,
 }
@@ -185,6 +197,40 @@ where
         Ok(())
     }
 
+    async fn read_source(
+        &mut self,
+        generation: u64,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, StreamError> {
+        match &mut self.source {
+            BrokerSource::Direct(source) => {
+                let source = source.as_mut();
+                self.reader
+                    .read_cancelable(
+                        &mut source.session,
+                        &source.file,
+                        offset,
+                        length,
+                        &self.cancellation,
+                        generation,
+                    )
+                    .await
+            }
+            BrokerSource::Recovering(source) => {
+                self.reader
+                    .read_recovering_cancelable(
+                        source.as_mut(),
+                        offset,
+                        length,
+                        &self.cancellation,
+                        generation,
+                    )
+                    .await
+            }
+        }
+    }
+
     async fn process_read(
         &mut self,
         generation: u64,
@@ -192,21 +238,15 @@ where
         length: usize,
     ) -> Result<Vec<u8>, BrokerError> {
         self.prepare_generation(generation, offset)?;
-        let result = self
-            .reader
-            .read_cancelable(
-                &mut self.session,
-                &self.file,
-                offset,
-                length,
-                &self.cancellation,
-                generation,
-            )
-            .await;
+        let result = self.read_source(generation, offset, length).await;
 
         match result {
             Ok(data) if self.cancellation.is_current(generation) => Ok(data),
-            Ok(_) | Err(StreamError::Client(ClientError::Cancelled)) => {
+            Ok(_) => {
+                self.reader.invalidate();
+                Err(BrokerError::StaleGeneration)
+            }
+            Err(error) if error.is_cancelled() => {
                 self.reader.invalidate();
                 Err(BrokerError::StaleGeneration)
             }
@@ -221,21 +261,15 @@ where
         length: usize,
     ) -> Result<(), BrokerError> {
         self.prepare_generation(generation, offset)?;
-        let result = self
-            .reader
-            .read_cancelable(
-                &mut self.session,
-                &self.file,
-                offset,
-                length,
-                &self.cancellation,
-                generation,
-            )
-            .await;
+        let result = self.read_source(generation, offset, length).await;
 
         match result {
             Ok(_) if self.cancellation.is_current(generation) => Ok(()),
-            Ok(_) | Err(StreamError::Client(ClientError::Cancelled)) => {
+            Ok(_) => {
+                self.reader.invalidate();
+                Err(BrokerError::StaleGeneration)
+            }
+            Err(error) if error.is_cancelled() => {
                 self.reader.invalidate();
                 Err(BrokerError::StaleGeneration)
             }
@@ -244,6 +278,7 @@ where
     }
 }
 
+/// Creates a broker over an already-authenticated session and open file.
 pub fn video_broker<T>(
     session: SessionConnection<T>,
     file: FileHandle,
@@ -252,14 +287,49 @@ pub fn video_broker<T>(
 where
     T: Transport,
 {
-    if config.queue_capacity == 0 {
+    validate_queue_capacity(config.queue_capacity)?;
+    let reader = VideoReader::new(config.reader)?;
+    Ok(broker_from_source(
+        BrokerSource::Direct(Box::new(DirectBrokerSource { session, file })),
+        reader,
+        config.queue_capacity,
+    ))
+}
+
+/// Connects a read-only SMB file and creates a broker that transparently restores retryable
+/// transport/session failures before replaying the idempotent read.
+pub async fn recovering_video_broker(
+    recipe: ReadOnlyReconnectRecipe,
+    config: VideoBrokerConfig,
+) -> Result<(VideoBrokerHandle, VideoBrokerRunner<TcpTransport>), BrokerError> {
+    validate_queue_capacity(config.queue_capacity)?;
+    let reader = VideoReader::new(config.reader)?;
+    let source = RecoveringReadOnlyFile::connect(recipe)
+        .await
+        .map_err(StreamError::from)?;
+    Ok(broker_from_source::<TcpTransport>(
+        BrokerSource::Recovering(Box::new(source)),
+        reader,
+        config.queue_capacity,
+    ))
+}
+
+fn validate_queue_capacity(queue_capacity: usize) -> Result<(), BrokerError> {
+    if queue_capacity == 0 {
         return Err(BrokerError::InvalidConfig(
             "queue_capacity must be greater than zero",
         ));
     }
-    let reader = VideoReader::new(config.reader)?;
+    Ok(())
+}
+
+fn broker_from_source<T>(
+    source: BrokerSource<T>,
+    reader: VideoReader,
+    queue_capacity: usize,
+) -> (VideoBrokerHandle, VideoBrokerRunner<T>) {
     let cancellation = ReadCancellationToken::new();
-    let (commands_tx, commands_rx) = mpsc::channel(config.queue_capacity);
+    let (commands_tx, commands_rx) = mpsc::channel(queue_capacity);
     let handle = VideoBrokerHandle {
         cancellation: cancellation.clone(),
         commands: commands_tx,
@@ -267,12 +337,11 @@ where
     let runner = VideoBrokerRunner {
         cancellation,
         commands: commands_rx,
-        session,
-        file,
+        source,
         reader,
         active_generation: 0,
     };
-    Ok((handle, runner))
+    (handle, runner)
 }
 
 #[cfg(test)]
@@ -292,10 +361,9 @@ mod tests {
 
     #[test]
     fn zero_queue_capacity_is_invalid_by_contract() {
-        let config = VideoBrokerConfig {
-            queue_capacity: 0,
-            ..VideoBrokerConfig::default()
-        };
-        assert_eq!(config.queue_capacity, 0);
+        assert!(matches!(
+            validate_queue_capacity(0),
+            Err(BrokerError::InvalidConfig(_))
+        ));
     }
 }
