@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feature/read-only-session
+          ref: main
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
