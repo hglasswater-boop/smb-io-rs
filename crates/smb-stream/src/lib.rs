@@ -12,7 +12,7 @@ pub use broker::{
     BrokerError, VideoBrokerConfig, VideoBrokerHandle, VideoBrokerRunner, recovering_video_broker,
     recovering_video_broker_with_policy, video_broker,
 };
-pub use video::{StreamError, VideoReader, VideoReaderConfig};
+pub use video::{StreamError, VideoReader, VideoReaderConfig, VideoReaderMetrics};
 
 /// Scheduling classes used by the stream request broker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

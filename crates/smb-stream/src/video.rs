@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use smb_io_client::{
     ClientError, FileHandle, PipelinedReadOptions, ReadCancellationToken, ReconnectError,
@@ -24,6 +25,61 @@ impl Default for VideoReaderConfig {
             max_cache_bytes: 8 * 1024 * 1024,
             pipeline: PipelinedReadOptions::default(),
         }
+    }
+}
+
+/// Cumulative workload measurements for one video-reader lifetime.
+///
+/// Timings cover successful SMB fetches end-to-end, including any reconnect delay that happened
+/// before the read eventually completed. Cache-only reads never contribute network timing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VideoReaderMetrics {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub foreground_fetches: u64,
+    pub foreground_fetch_bytes: u64,
+    pub foreground_fetch_micros: u64,
+    pub prefetch_fetches: u64,
+    pub prefetch_fetch_bytes: u64,
+    pub prefetch_fetch_micros: u64,
+}
+
+impl VideoReaderMetrics {
+    pub fn foreground_throughput_bytes_per_second(self) -> Option<u64> {
+        throughput_bytes_per_second(self.foreground_fetch_bytes, self.foreground_fetch_micros)
+    }
+
+    pub fn prefetch_throughput_bytes_per_second(self) -> Option<u64> {
+        throughput_bytes_per_second(self.prefetch_fetch_bytes, self.prefetch_fetch_micros)
+    }
+
+    pub fn total_throughput_bytes_per_second(self) -> Option<u64> {
+        throughput_bytes_per_second(
+            self.foreground_fetch_bytes
+                .saturating_add(self.prefetch_fetch_bytes),
+            self.foreground_fetch_micros
+                .saturating_add(self.prefetch_fetch_micros),
+        )
+    }
+
+    fn record_foreground_fetch(&mut self, bytes: usize, elapsed: Duration) {
+        self.foreground_fetches = self.foreground_fetches.saturating_add(1);
+        self.foreground_fetch_bytes = self
+            .foreground_fetch_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.foreground_fetch_micros = self
+            .foreground_fetch_micros
+            .saturating_add(duration_micros(elapsed));
+    }
+
+    fn record_prefetch_fetch(&mut self, bytes: usize, elapsed: Duration) {
+        self.prefetch_fetches = self.prefetch_fetches.saturating_add(1);
+        self.prefetch_fetch_bytes = self
+            .prefetch_fetch_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.prefetch_fetch_micros = self
+            .prefetch_fetch_micros
+            .saturating_add(duration_micros(elapsed));
     }
 }
 
@@ -141,6 +197,7 @@ pub struct VideoReader {
     generation: u64,
     last_request_end: Option<u64>,
     cache: Option<CachedWindow>,
+    metrics: VideoReaderMetrics,
 }
 
 impl VideoReader {
@@ -151,6 +208,7 @@ impl VideoReader {
             generation: 0,
             last_request_end: None,
             cache: None,
+            metrics: VideoReaderMetrics::default(),
         })
     }
 
@@ -164,6 +222,10 @@ impl VideoReader {
 
     pub fn cached_bytes(&self) -> usize {
         self.cache.as_ref().map_or(0, |cache| cache.data.len())
+    }
+
+    pub fn metrics(&self) -> VideoReaderMetrics {
+        self.metrics
     }
 
     pub fn cached_range(&self) -> Result<Option<(u64, u64)>, StreamError> {
@@ -283,6 +345,7 @@ impl VideoReader {
             return Ok(0);
         };
 
+        let started = Instant::now();
         let fetched = session
             .read_at_pipelined_cancelable_with_options(
                 file,
@@ -293,6 +356,8 @@ impl VideoReader {
                 generation,
             )
             .await?;
+        self.metrics
+            .record_prefetch_fetch(fetched.len(), started.elapsed());
         self.finish_prefetch_extension(plan, fetched, cancellation_context)
     }
 
@@ -343,6 +408,7 @@ impl VideoReader {
             return Ok(0);
         };
 
+        let started = Instant::now();
         let fetched = source
             .read_at_pipelined_cancelable_with_options(
                 plan.offset,
@@ -352,6 +418,8 @@ impl VideoReader {
                 generation,
             )
             .await?;
+        self.metrics
+            .record_prefetch_fetch(fetched.len(), started.elapsed());
         self.finish_prefetch_extension(plan, fetched, cancellation_context)
     }
 
@@ -377,6 +445,7 @@ impl VideoReader {
                 } => (target, fetch_len, reader_generation),
             };
 
+        let started = Instant::now();
         let fetched = if let Some((token, generation)) = cancellation {
             session
                 .read_at_pipelined_cancelable_with_options(
@@ -393,6 +462,8 @@ impl VideoReader {
                 .read_at_pipelined_with_options(file, offset, fetch_len, self.config.pipeline)
                 .await?
         };
+        self.metrics
+            .record_foreground_fetch(fetched.len(), started.elapsed());
 
         self.finish_fetch(offset, target, reader_generation, fetched, cancellation)
     }
@@ -415,6 +486,7 @@ impl VideoReader {
                 } => (target, fetch_len, reader_generation),
             };
 
+        let started = Instant::now();
         let fetched = if let Some((token, generation)) = cancellation {
             source
                 .read_at_pipelined_cancelable_with_options(
@@ -430,6 +502,8 @@ impl VideoReader {
                 .read_at_pipelined_with_options(offset, fetch_len, self.config.pipeline)
                 .await?
         };
+        self.metrics
+            .record_foreground_fetch(fetched.len(), started.elapsed());
 
         self.finish_fetch(offset, target, reader_generation, fetched, cancellation)
     }
@@ -452,11 +526,13 @@ impl VideoReader {
                 if let Some(data) = cache.slice(offset, target)? {
                     ensure_not_cancelled(cancellation)?;
                     self.last_request_end = Some(request_end(offset, data.len())?);
+                    self.metrics.cache_hits = self.metrics.cache_hits.saturating_add(1);
                     return Ok(PreparedRead::Cached(data));
                 }
             }
         }
 
+        self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
         if self.is_seek_miss(offset)? {
             self.bump_generation();
             self.cache = None;
@@ -650,6 +726,20 @@ impl VideoReader {
     }
 }
 
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn throughput_bytes_per_second(bytes: u64, micros: u64) -> Option<u64> {
+    if bytes == 0 || micros == 0 {
+        return None;
+    }
+    let per_second = u128::from(bytes)
+        .saturating_mul(1_000_000)
+        .checked_div(u128::from(micros))?;
+    Some(u64::try_from(per_second).unwrap_or(u64::MAX))
+}
+
 fn ensure_not_cancelled(
     cancellation: Option<(&ReadCancellationToken, u64)>,
 ) -> Result<(), StreamError> {
@@ -699,6 +789,48 @@ fn target_len(file_len: u64, offset: u64, length: usize) -> Result<usize, Stream
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregate_throughput_metrics_use_successful_fetch_time() {
+        let mut metrics = VideoReaderMetrics::default();
+        metrics.record_foreground_fetch(1_000_000, Duration::from_millis(500));
+        metrics.record_prefetch_fetch(500_000, Duration::from_millis(250));
+
+        assert_eq!(
+            metrics.foreground_throughput_bytes_per_second(),
+            Some(2_000_000)
+        );
+        assert_eq!(
+            metrics.prefetch_throughput_bytes_per_second(),
+            Some(2_000_000)
+        );
+        assert_eq!(metrics.total_throughput_bytes_per_second(), Some(2_000_000));
+        assert_eq!(metrics.foreground_fetches, 1);
+        assert_eq!(metrics.prefetch_fetches, 1);
+    }
+
+    #[test]
+    fn cache_hit_and_miss_metrics_follow_read_plans() {
+        let mut reader = VideoReader::new(VideoReaderConfig::default()).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: (0u8..32).collect(),
+        });
+
+        assert!(matches!(
+            reader.prepare_read(1_000, 108, 4, None).unwrap(),
+            PreparedRead::Cached(_)
+        ));
+        assert!(matches!(
+            reader.prepare_read(1_000, 500, 4, None).unwrap(),
+            PreparedRead::Fetch { .. }
+        ));
+
+        let metrics = reader.metrics();
+        assert_eq!(metrics.cache_hits, 1);
+        assert_eq!(metrics.cache_misses, 1);
+    }
 
     #[test]
     fn cached_window_returns_positional_slice() {
