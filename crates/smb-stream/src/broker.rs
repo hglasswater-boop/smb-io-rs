@@ -134,7 +134,7 @@ impl VideoBrokerHandle {
     /// caller that may be on a playback thread. A closed broker remains an error. Any later
     /// foreground read invalidates queued or in-flight speculative work before it can compete for
     /// the SMB connection.
-    pub async fn prefetch(&self, offset: u64, length: usize) -> Result<(), BrokerError> {
+    pub fn prefetch(&self, offset: u64, length: usize) -> Result<(), BrokerError> {
         let command = PrefetchCommand {
             playback_generation: self.cancellation.generation(),
             prefetch_generation: self.prefetch_cancellation.generation(),
@@ -545,8 +545,8 @@ mod tests {
         assert_eq!(caller.await.unwrap().unwrap(), vec![7]);
     }
 
-    #[tokio::test]
-    async fn full_prefetch_queue_drops_new_hint_without_waiting() {
+    #[test]
+    fn full_prefetch_queue_drops_new_hint_without_waiting() {
         let cancellation = ReadCancellationToken::new();
         let prefetch_cancellation = ReadCancellationToken::new();
         let (interactive_tx, _interactive_rx) = mpsc::channel(1);
@@ -559,8 +559,8 @@ mod tests {
             file_len: 123,
         };
 
-        handle.prefetch(10, 4).await.unwrap();
-        handle.prefetch(20, 4).await.unwrap();
+        handle.prefetch(10, 4).unwrap();
+        handle.prefetch(20, 4).unwrap();
 
         let queued = background_rx.try_recv().unwrap();
         assert_eq!(queued.offset, 10);
