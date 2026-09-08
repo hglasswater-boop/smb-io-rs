@@ -333,9 +333,7 @@ where
 
         match result {
             Ok(_)
-                if self
-                    .cancellation
-                    .is_current(command.playback_generation)
+                if self.cancellation.is_current(command.playback_generation)
                     && self
                         .prefetch_cancellation
                         .is_current(command.prefetch_generation) =>
