@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 smb-io-fs = { path = "../smb-fs" }
 smb-io-client = { path = "../smb-client" }
-tokio = { version = "1.40", features = ["sync", "macros"] }
+tokio = { version = "1.40", features = ["sync", "macros", "rt"] }
 
 [lints]
 workspace = true
