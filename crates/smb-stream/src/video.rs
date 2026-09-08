@@ -201,6 +201,7 @@ pub struct VideoReader {
     last_request_end: Option<u64>,
     cache: Option<CachedWindow>,
     metrics: VideoReaderMetrics,
+    smoothed_throughput_bytes_per_second: Option<u64>,
 }
 
 impl VideoReader {
@@ -212,6 +213,7 @@ impl VideoReader {
             last_request_end: None,
             cache: None,
             metrics: VideoReaderMetrics::default(),
+            smoothed_throughput_bytes_per_second: None,
         })
     }
 
@@ -231,17 +233,22 @@ impl VideoReader {
         self.metrics
     }
 
+    /// Smoothed recent SMB throughput used by the adaptive read-ahead controller.
+    pub fn smoothed_throughput_bytes_per_second(&self) -> Option<u64> {
+        self.smoothed_throughput_bytes_per_second
+    }
+
     /// Current speculative window target.
     ///
     /// Before the first successful SMB fetch this is the configured bootstrap value. Afterwards it
-    /// tracks observed aggregate fetch throughput for `target_buffer_duration`, clamped between one
-    /// SMB request chunk and the configured cache budget.
+    /// tracks a recent-throughput EWMA for `target_buffer_duration`, clamped between one SMB request
+    /// chunk and the configured cache budget.
     pub fn read_ahead_target_bytes(&self) -> usize {
         let bootstrap = self
             .config
             .read_ahead_bytes
             .min(self.config.max_cache_bytes);
-        let Some(throughput) = self.metrics.total_throughput_bytes_per_second() else {
+        let Some(throughput) = self.smoothed_throughput_bytes_per_second else {
             return bootstrap;
         };
 
@@ -389,8 +396,7 @@ impl VideoReader {
                 generation,
             )
             .await?;
-        self.metrics
-            .record_prefetch_fetch(fetched.len(), started.elapsed());
+        self.record_prefetch_fetch(fetched.len(), started.elapsed());
         self.finish_prefetch_extension(plan, fetched, cancellation_context)
     }
 
@@ -451,8 +457,7 @@ impl VideoReader {
                 generation,
             )
             .await?;
-        self.metrics
-            .record_prefetch_fetch(fetched.len(), started.elapsed());
+        self.record_prefetch_fetch(fetched.len(), started.elapsed());
         self.finish_prefetch_extension(plan, fetched, cancellation_context)
     }
 
@@ -495,8 +500,7 @@ impl VideoReader {
                 .read_at_pipelined_with_options(file, offset, fetch_len, self.config.pipeline)
                 .await?
         };
-        self.metrics
-            .record_foreground_fetch(fetched.len(), started.elapsed());
+        self.record_foreground_fetch(fetched.len(), started.elapsed());
 
         self.finish_fetch(offset, target, reader_generation, fetched, cancellation)
     }
@@ -535,8 +539,7 @@ impl VideoReader {
                 .read_at_pipelined_with_options(offset, fetch_len, self.config.pipeline)
                 .await?
         };
-        self.metrics
-            .record_foreground_fetch(fetched.len(), started.elapsed());
+        self.record_foreground_fetch(fetched.len(), started.elapsed());
 
         self.finish_fetch(offset, target, reader_generation, fetched, cancellation)
     }
@@ -734,6 +737,32 @@ impl VideoReader {
         Ok(append_len)
     }
 
+    fn record_foreground_fetch(&mut self, bytes: usize, elapsed: Duration) {
+        self.metrics.record_foreground_fetch(bytes, elapsed);
+        self.record_throughput_sample(bytes, elapsed);
+    }
+
+    fn record_prefetch_fetch(&mut self, bytes: usize, elapsed: Duration) {
+        self.metrics.record_prefetch_fetch(bytes, elapsed);
+        self.record_throughput_sample(bytes, elapsed);
+    }
+
+    fn record_throughput_sample(&mut self, bytes: usize, elapsed: Duration) {
+        let Some(sample) = throughput_bytes_per_second(
+            u64::try_from(bytes).unwrap_or(u64::MAX),
+            duration_micros(elapsed),
+        ) else {
+            return;
+        };
+        self.smoothed_throughput_bytes_per_second = Some(
+            self.smoothed_throughput_bytes_per_second
+                .map_or(sample, |previous| {
+                    let average = (u128::from(previous) + u128::from(sample)) / 2;
+                    u64::try_from(average).unwrap_or(u64::MAX)
+                }),
+        );
+    }
+
     fn is_seek_miss(&self, offset: u64) -> Result<bool, StreamError> {
         let Some(last_end) = self.last_request_end else {
             return Ok(false);
@@ -846,21 +875,49 @@ mod tests {
     }
 
     #[test]
+    fn smoothed_throughput_favors_recent_fetches() {
+        let mut reader = VideoReader::new(VideoReaderConfig::default()).unwrap();
+        reader.record_foreground_fetch(8_000_000, Duration::from_secs(1));
+        assert_eq!(
+            reader.smoothed_throughput_bytes_per_second(),
+            Some(8_000_000)
+        );
+
+        reader.record_prefetch_fetch(2_000_000, Duration::from_secs(1));
+        assert_eq!(
+            reader.smoothed_throughput_bytes_per_second(),
+            Some(5_000_000)
+        );
+        assert_eq!(
+            reader.metrics().total_throughput_bytes_per_second(),
+            Some(5_000_000)
+        );
+
+        reader.record_prefetch_fetch(2_000_000, Duration::from_secs(1));
+        assert_eq!(
+            reader.smoothed_throughput_bytes_per_second(),
+            Some(3_500_000)
+        );
+        assert_eq!(
+            reader.metrics().total_throughput_bytes_per_second(),
+            Some(4_000_000)
+        );
+    }
+
+    #[test]
     fn adaptive_target_uses_bootstrap_before_network_metrics() {
         let reader = VideoReader::new(VideoReaderConfig::default()).unwrap();
         assert_eq!(reader.read_ahead_target_bytes(), 2 * 1024 * 1024);
     }
 
     #[test]
-    fn adaptive_target_tracks_observed_throughput_horizon() {
+    fn adaptive_target_tracks_smoothed_throughput_horizon() {
         let config = VideoReaderConfig {
             target_buffer_duration: Duration::from_millis(500),
             ..VideoReaderConfig::default()
         };
         let mut reader = VideoReader::new(config).unwrap();
-        reader
-            .metrics
-            .record_foreground_fetch(6 * 1024 * 1024, Duration::from_secs(1));
+        reader.record_foreground_fetch(6 * 1024 * 1024, Duration::from_secs(1));
 
         assert_eq!(reader.read_ahead_target_bytes(), 3 * 1024 * 1024);
     }
@@ -868,16 +925,14 @@ mod tests {
     #[test]
     fn adaptive_target_clamps_to_pipeline_chunk_and_cache_budget() {
         let mut slow = VideoReader::new(VideoReaderConfig::default()).unwrap();
-        slow.metrics
-            .record_foreground_fetch(64 * 1024, Duration::from_secs(1));
+        slow.record_foreground_fetch(64 * 1024, Duration::from_secs(1));
         assert_eq!(
             slow.read_ahead_target_bytes(),
             PipelinedReadOptions::default().chunk_size
         );
 
         let mut fast = VideoReader::new(VideoReaderConfig::default()).unwrap();
-        fast.metrics
-            .record_foreground_fetch(64 * 1024 * 1024, Duration::from_secs(1));
+        fast.record_foreground_fetch(64 * 1024 * 1024, Duration::from_secs(1));
         assert_eq!(fast.read_ahead_target_bytes(), 8 * 1024 * 1024);
     }
 
