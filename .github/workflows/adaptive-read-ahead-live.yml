@@ -1,0 +1,106 @@
+name: Adaptive Read Ahead Live
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/smb-stream/**'
+      - 'crates/smb-probe/examples/adaptive_read_ahead.rs'
+      - '.github/workflows/adaptive-read-ahead-live.yml'
+  pull_request:
+    paths:
+      - 'crates/smb-stream/**'
+      - 'crates/smb-probe/examples/adaptive_read_ahead.rs'
+      - '.github/workflows/adaptive-read-ahead-live.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  adaptive:
+    name: Live throughput changes read-ahead target
+    runs-on: ubuntu-latest
+    env:
+      SMB_PORT: '1445'
+      SMB_USER: smbtest
+      SMB_PASSWORD: 'XFiles-Rust-SMB-42!'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Samba
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y samba
+          sudo systemctl stop smbd nmbd 2>/dev/null || true
+          sudo pkill smbd 2>/dev/null || true
+
+      - name: Create SMB account and video fixture
+        run: |
+          set -eux
+          sudo useradd --no-create-home --shell /usr/sbin/nologin "$SMB_USER" 2>/dev/null || true
+          printf '%s\n%s\n' "$SMB_PASSWORD" "$SMB_PASSWORD" | sudo smbpasswd -s -a "$SMB_USER"
+          sudo rm -rf /tmp/xfiles-adaptive-fixtures
+          sudo mkdir -p /tmp/xfiles-adaptive-fixtures
+          sudo truncate -s $((8 * 1024 * 1024)) /tmp/xfiles-adaptive-fixtures/video.bin
+          printf 'XFILES_ADAPTIVE_READ_AHEAD' | sudo dd \
+            of=/tmp/xfiles-adaptive-fixtures/video.bin \
+            bs=1 \
+            seek=0 \
+            conv=notrunc \
+            status=none
+          sudo chown -R "$SMB_USER":"$SMB_USER" /tmp/xfiles-adaptive-fixtures
+          sudo chmod -R a+rX /tmp/xfiles-adaptive-fixtures
+
+      - name: Start signing-required SMB 3.1.1 server
+        run: |
+          cat > /tmp/xfiles-adaptive-smb.conf <<EOF
+          [global]
+            server role = standalone server
+            workgroup = WORKGROUP
+            security = user
+            map to guest = Never
+            server min protocol = SMB2_10
+            server max protocol = SMB3_11
+            server signing = mandatory
+            smb ports = ${SMB_PORT}
+            interfaces = 127.0.0.1
+            bind interfaces only = yes
+            disable netbios = yes
+            log level = 2
+            log file = /tmp/xfiles-adaptive-smb.log
+
+          [auth]
+            path = /tmp/xfiles-adaptive-fixtures
+            read only = yes
+            guest ok = no
+            valid users = ${SMB_USER}
+          EOF
+          sudo smbd -D -s /tmp/xfiles-adaptive-smb.conf
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          sudo cat /tmp/xfiles-adaptive-smb.log || true
+          exit 1
+
+      - name: Verify live throughput changes adaptive target
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe --example adaptive_read_ahead -- \
+            127.0.0.1 "$SMB_PORT" auth video.bin \
+            "$SMB_USER" "$SMB_PASSWORD" \
+            | tee /tmp/adaptive-read-ahead.log
+          grep -q '^adaptive_bootstrap_bytes: 262144$' /tmp/adaptive-read-ahead.log
+          grep -Eq '^adaptive_foreground_fetches: [1-9][0-9]*$' /tmp/adaptive-read-ahead.log
+          grep -Eq '^adaptive_throughput_bytes_per_second: [1-9][0-9]*$' /tmp/adaptive-read-ahead.log
+          grep -q '^adaptive_changed: true$' /tmp/adaptive-read-ahead.log
+
+      - name: Dump Samba logs on failure
+        if: failure()
+        run: |
+          sudo cat /tmp/xfiles-adaptive-smb.log 2>/dev/null || true
+          cat /tmp/adaptive-read-ahead.log 2>/dev/null || true
