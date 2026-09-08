@@ -10,7 +10,7 @@ mod video;
 
 pub use broker::{
     BrokerError, VideoBrokerConfig, VideoBrokerHandle, VideoBrokerRunner, recovering_video_broker,
-    video_broker,
+    recovering_video_broker_with_policy, video_broker,
 };
 pub use video::{StreamError, VideoReader, VideoReaderConfig};
 
