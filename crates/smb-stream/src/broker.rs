@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 
 use smb_io_client::{
     CloseInfo, CloseOptions, FileHandle, ReadCancellationToken, ReadOnlyReconnectRecipe,
@@ -8,6 +9,11 @@ use smb_io_client::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{StreamError, VideoReader, VideoReaderConfig};
+
+/// Give bursty foreground consumers a chance to enqueue their next READ before speculative I/O
+/// starts using the SMB connection. Media players commonly issue clusters of small synchronous
+/// reads; starting prefetch immediately after each one causes a READ -> PREFETCH -> CANCEL loop.
+const PREFETCH_IDLE_GRACE: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy)]
 pub struct VideoBrokerConfig {
@@ -210,15 +216,20 @@ where
 
         let mut interactive_open = true;
         let mut background_open = true;
+        let mut deferred_interactive: Option<InteractiveCommand> = None;
 
         while interactive_open || background_open {
-            let selected = tokio::select! {
-                biased;
-                command = self.interactive_commands.recv(), if interactive_open => {
-                    SelectedCommand::Interactive(command)
-                }
-                changed = self.background_command.changed(), if background_open => {
-                    SelectedCommand::Background(changed)
+            let selected = if let Some(command) = deferred_interactive.take() {
+                SelectedCommand::Interactive(Some(command))
+            } else {
+                tokio::select! {
+                    biased;
+                    command = self.interactive_commands.recv(), if interactive_open => {
+                        SelectedCommand::Interactive(command)
+                    }
+                    changed = self.background_command.changed(), if background_open => {
+                        SelectedCommand::Background(changed)
+                    }
                 }
             };
 
@@ -248,6 +259,27 @@ where
                 }
                 SelectedCommand::Interactive(None) => interactive_open = false,
                 SelectedCommand::Background(Ok(())) => {
+                    // Do not launch speculative network I/O at the first instant the foreground
+                    // queue becomes empty. Media3 and similar consumers often enqueue the next
+                    // synchronous READ a moment later. Waiting only for foreground work during this
+                    // short grace period lets that READ invalidate the old prefetch generation
+                    // before any SMB2 CANCEL-producing work starts.
+                    if interactive_open {
+                        match tokio::time::timeout(
+                            PREFETCH_IDLE_GRACE,
+                            self.interactive_commands.recv(),
+                        )
+                        .await
+                        {
+                            Ok(Some(command)) => {
+                                deferred_interactive = Some(command);
+                                continue;
+                            }
+                            Ok(None) => interactive_open = false,
+                            Err(_) => {}
+                        }
+                    }
+
                     let command = *self.background_command.borrow_and_update();
                     if let Some(command) = command {
                         let _ = self.process_prefetch(command).await;
