@@ -1,0 +1,39 @@
+name: Defer Auto Prefetch Once
+
+on:
+  push:
+    branches:
+      - feature/defer-auto-prefetch
+    paths:
+      - '.github/workflows/defer-auto-prefetch-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/defer-auto-prefetch
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply deferred auto-prefetch patch
+        run: python3 tools/defer_auto_prefetch.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Validate stream and Android bridge
+        run: |
+          cargo test -p smb-io-stream
+          cargo check -p smb-io-android
+          cargo clippy -p smb-io-stream -p smb-io-android -- -D warnings
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/smb-stream/src/broker.rs
+          git diff --cached --quiet && exit 1
+          git commit -m "refactor(stream): defer automatic prefetch"
+          git push
