@@ -257,8 +257,8 @@ impl VideoReader {
     /// Extends the current sequential cache without moving the foreground playback cursor.
     ///
     /// The hint must point inside the current cache or exactly at its end. Unrelated/far-away hints,
-    /// full caches, EOF, and absent caches are ignored so speculative work never evicts useful
-    /// foreground data.
+    /// EOF, and absent caches are ignored. A full cache may roll forward only when already-consumed
+    /// prefix bytes can be reclaimed without evicting data around the foreground cursor.
     pub async fn prefetch_cancelable<T>(
         &mut self,
         session: &mut SessionConnection<T>,
