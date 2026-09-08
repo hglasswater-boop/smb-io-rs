@@ -286,6 +286,43 @@ where
         }
     }
 
+    async fn prefetch_source(
+        &mut self,
+        hint_offset: u64,
+        hint_length: usize,
+        cancellation: &ReadCancellationToken,
+        generation: u64,
+    ) -> Result<usize, BrokerError> {
+        let source = self.source.as_mut().ok_or(BrokerError::Closed)?;
+        match source {
+            BrokerSource::Direct(source) => {
+                let source = source.as_mut();
+                self.reader
+                    .prefetch_cancelable(
+                        &mut source.session,
+                        &source.file,
+                        hint_offset,
+                        hint_length,
+                        cancellation,
+                        generation,
+                    )
+                    .await
+                    .map_err(BrokerError::Stream)
+            }
+            BrokerSource::Recovering(source) => self
+                .reader
+                .prefetch_recovering_cancelable(
+                    source.as_mut(),
+                    hint_offset,
+                    hint_length,
+                    cancellation,
+                    generation,
+                )
+                .await
+                .map_err(BrokerError::Stream),
+        }
+    }
+
     async fn process_read(
         &mut self,
         generation: u64,
@@ -323,7 +360,7 @@ where
 
         let cancellation = self.prefetch_cancellation.clone();
         let result = self
-            .read_source(
+            .prefetch_source(
                 command.offset,
                 command.length,
                 &cancellation,
