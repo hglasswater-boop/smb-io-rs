@@ -205,6 +205,41 @@ pub fn native_read_at<'local>(
 }
 
 #[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_prefetch<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    position: jlong,
+    length: jint,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            let Some(handle) = video_handle(env, handle)? else {
+                return Ok(());
+            };
+            if position < 0 {
+                return throw_argument(env, "SMB prefetch position must not be negative");
+            }
+            if length < 0 {
+                return throw_argument(env, "SMB prefetch length must not be negative");
+            }
+            if length == 0 {
+                return Ok(());
+            }
+
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.prefetch(handle, position as u64, length as usize) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_seek<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
