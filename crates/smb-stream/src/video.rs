@@ -119,6 +119,15 @@ enum PreparedRead {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrefetchExtension {
+    offset: u64,
+    fetch_len: usize,
+    reader_generation: u64,
+    expected_cache_start: u64,
+    expected_cache_len: usize,
+}
+
 /// Stateful video-oriented reader layered on positional SMB reads.
 ///
 /// It keeps one bounded contiguous read-ahead window. Sequential requests are normally served from
@@ -212,6 +221,47 @@ impl VideoReader {
         .await
     }
 
+    /// Extends the current sequential cache without moving the foreground playback cursor.
+    ///
+    /// The hint must point inside the current cache or exactly at its end. Unrelated/far-away hints,
+    /// full caches, EOF, and absent caches are ignored so speculative work never evicts useful
+    /// foreground data.
+    pub async fn prefetch_cancelable<T>(
+        &mut self,
+        session: &mut SessionConnection<T>,
+        file: &FileHandle,
+        hint_offset: u64,
+        hint_length: usize,
+        cancellation: &ReadCancellationToken,
+        generation: u64,
+    ) -> Result<usize, StreamError>
+    where
+        T: Transport,
+    {
+        let cancellation_context = Some((cancellation, generation));
+        let Some(plan) = self.prepare_prefetch_extension(
+            file.len(),
+            hint_offset,
+            hint_length,
+            cancellation_context,
+        )?
+        else {
+            return Ok(0);
+        };
+
+        let fetched = session
+            .read_at_pipelined_cancelable_with_options(
+                file,
+                plan.offset,
+                plan.fetch_len,
+                self.config.pipeline,
+                cancellation,
+                generation,
+            )
+            .await?;
+        self.finish_prefetch_extension(plan, fetched, cancellation_context)
+    }
+
     /// Reads through a reconnecting read-only file while preserving the same cache/read-ahead
     /// behavior as `read`.
     pub async fn read_recovering(
@@ -236,6 +286,39 @@ impl VideoReader {
     ) -> Result<Vec<u8>, StreamError> {
         self.read_recovering_impl(source, offset, length, Some((cancellation, generation)))
             .await
+    }
+
+    /// Reconnecting counterpart to `prefetch_cancelable`. Reconnect and retry remain subject to the
+    /// source's read-reconnect policy, while cancellation can stop both SMB I/O and reconnect work.
+    pub async fn prefetch_recovering_cancelable(
+        &mut self,
+        source: &mut RecoveringReadOnlyFile,
+        hint_offset: u64,
+        hint_length: usize,
+        cancellation: &ReadCancellationToken,
+        generation: u64,
+    ) -> Result<usize, StreamError> {
+        let cancellation_context = Some((cancellation, generation));
+        let Some(plan) = self.prepare_prefetch_extension(
+            source.len(),
+            hint_offset,
+            hint_length,
+            cancellation_context,
+        )?
+        else {
+            return Ok(0);
+        };
+
+        let fetched = source
+            .read_at_pipelined_cancelable_with_options(
+                plan.offset,
+                plan.fetch_len,
+                self.config.pipeline,
+                cancellation,
+                generation,
+            )
+            .await?;
+        self.finish_prefetch_extension(plan, fetched, cancellation_context)
     }
 
     async fn read_impl<T>(
@@ -362,6 +445,53 @@ impl VideoReader {
         })
     }
 
+    fn prepare_prefetch_extension(
+        &self,
+        file_len: u64,
+        hint_offset: u64,
+        hint_length: usize,
+        cancellation: Option<(&ReadCancellationToken, u64)>,
+    ) -> Result<Option<PrefetchExtension>, StreamError> {
+        ensure_not_cancelled(cancellation)?;
+        if hint_length == 0 || hint_offset >= file_len {
+            return Ok(None);
+        }
+
+        let Some(cache) = self.cache.as_ref() else {
+            return Ok(None);
+        };
+        if cache.generation != self.generation {
+            return Ok(None);
+        }
+
+        let cache_end = cache.end()?;
+        if hint_offset < cache.start || hint_offset > cache_end {
+            return Ok(None);
+        }
+        if cache.data.len() >= self.config.max_cache_bytes || cache_end >= file_len {
+            return Ok(None);
+        }
+
+        let available_capacity = self.config.max_cache_bytes - cache.data.len();
+        let file_remaining = usize::try_from(file_len - cache_end).unwrap_or(usize::MAX);
+        let fetch_len = self
+            .config
+            .read_ahead_bytes
+            .min(available_capacity)
+            .min(file_remaining);
+        if fetch_len == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(PrefetchExtension {
+            offset: cache_end,
+            fetch_len,
+            reader_generation: self.generation,
+            expected_cache_start: cache.start,
+            expected_cache_len: cache.data.len(),
+        }))
+    }
+
     fn finish_fetch(
         &mut self,
         offset: u64,
@@ -390,6 +520,34 @@ impl VideoReader {
         }
 
         Ok(result)
+    }
+
+    fn finish_prefetch_extension(
+        &mut self,
+        plan: PrefetchExtension,
+        fetched: Vec<u8>,
+        cancellation: Option<(&ReadCancellationToken, u64)>,
+    ) -> Result<usize, StreamError> {
+        ensure_not_cancelled(cancellation)?;
+        if plan.reader_generation != self.generation {
+            return Ok(0);
+        }
+
+        let Some(cache) = self.cache.as_mut() else {
+            return Ok(0);
+        };
+        if cache.generation != plan.reader_generation
+            || cache.start != plan.expected_cache_start
+            || cache.data.len() != plan.expected_cache_len
+            || cache.end()? != plan.offset
+        {
+            return Ok(0);
+        }
+
+        let capacity = self.config.max_cache_bytes - cache.data.len();
+        let append_len = fetched.len().min(capacity);
+        cache.data.extend_from_slice(&fetched[..append_len]);
+        Ok(append_len)
     }
 
     fn is_seek_miss(&self, offset: u64) -> Result<bool, StreamError> {
@@ -535,5 +693,115 @@ mod tests {
 
         let fetch = reader.prepare_read(1_000, 500, 4, None).unwrap();
         assert!(matches!(fetch, PreparedRead::Fetch { target: 4, .. }));
+    }
+
+    #[test]
+    fn prefetch_extends_from_cache_end_within_budget() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 2 * 1024,
+            max_cache_bytes: 8 * 1024,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: vec![1; 2 * 1024],
+        });
+        reader.last_request_end = Some(132);
+
+        let plan = reader
+            .prepare_prefetch_extension(20_000, 132, 512, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.offset, 100 + 2 * 1024);
+        assert_eq!(plan.fetch_len, 2 * 1024);
+    }
+
+    #[test]
+    fn prefetch_does_not_replace_full_or_unrelated_cache() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 2 * 1024,
+            max_cache_bytes: 8 * 1024,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 1_000,
+            data: vec![1; 8 * 1024],
+        });
+        assert!(
+            reader
+                .prepare_prefetch_extension(50_000, 1_100, 512, None)
+                .unwrap()
+                .is_none()
+        );
+
+        reader.cache.as_mut().unwrap().data.truncate(2 * 1024);
+        assert!(
+            reader
+                .prepare_prefetch_extension(50_000, 10_000, 512, None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(reader.cached_range().unwrap(), Some((1_000, 3_048)));
+    }
+
+    #[test]
+    fn finishing_prefetch_appends_without_moving_foreground_cursor() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 4,
+            max_cache_bytes: 16,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: vec![1, 2, 3, 4],
+        });
+        reader.last_request_end = Some(102);
+        let plan = reader
+            .prepare_prefetch_extension(1_000, 102, 1, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            reader
+                .finish_prefetch_extension(plan, vec![5, 6, 7, 8], None)
+                .unwrap(),
+            4
+        );
+        assert_eq!(reader.cached_range().unwrap(), Some((100, 108)));
+        assert_eq!(reader.last_request_end, Some(102));
+    }
+
+    #[test]
+    fn stale_prefetch_plan_never_appends() {
+        let config = VideoReaderConfig {
+            read_ahead_bytes: 4,
+            max_cache_bytes: 16,
+            ..VideoReaderConfig::default()
+        };
+        let mut reader = VideoReader::new(config).unwrap();
+        reader.cache = Some(CachedWindow {
+            generation: 0,
+            start: 100,
+            data: vec![1, 2, 3, 4],
+        });
+        let plan = reader
+            .prepare_prefetch_extension(1_000, 102, 1, None)
+            .unwrap()
+            .unwrap();
+        reader.seek(500);
+
+        assert_eq!(
+            reader
+                .finish_prefetch_extension(plan, vec![5, 6, 7, 8], None)
+                .unwrap(),
+            0
+        );
+        assert_eq!(reader.cached_bytes(), 0);
     }
 }
