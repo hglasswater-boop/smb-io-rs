@@ -306,7 +306,8 @@ impl AndroidEngine {
             .map_err(map_broker_error)
     }
 
-    /// Queues optional speculative I/O. Any foreground `read_at`, seek, or close preempts it.
+    /// Queues optional speculative I/O without waiting for the Tokio runtime. Any foreground
+    /// `read_at`, seek, or close preempts it, and a full background queue drops the hint.
     pub fn prefetch(
         &self,
         handle: VideoHandle,
@@ -315,9 +316,7 @@ impl AndroidEngine {
     ) -> Result<(), AndroidBridgeError> {
         self.validate_read_length(length)?;
         let video = self.videos.get(handle)?;
-        self.runtime
-            .block_on(video.broker.prefetch(offset, length))
-            .map_err(map_broker_error)
+        video.broker.prefetch(offset, length).map_err(map_broker_error)
     }
 
     /// Advances the playback generation immediately without waiting for the broker runner.
