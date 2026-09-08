@@ -238,10 +238,13 @@ impl VideoReader {
     where
         T: Transport,
     {
-        let cancellation = Some((cancellation, generation));
-        let Some(plan) =
-            self.prepare_prefetch_extension(file.len(), hint_offset, hint_length, cancellation)?
-        else {
+        let cancellation_context = Some((cancellation, generation));
+        let Some(plan) = self.prepare_prefetch_extension(
+            file.len(),
+            hint_offset,
+            hint_length,
+            cancellation_context,
+        )? else {
             return Ok(0);
         };
 
@@ -251,11 +254,11 @@ impl VideoReader {
                 plan.offset,
                 plan.fetch_len,
                 self.config.pipeline,
-                cancellation.0.unwrap(),
+                cancellation,
                 generation,
             )
             .await?;
-        self.finish_prefetch_extension(plan, fetched, cancellation)
+        self.finish_prefetch_extension(plan, fetched, cancellation_context)
     }
 
     /// Reads through a reconnecting read-only file while preserving the same cache/read-ahead
@@ -294,12 +297,12 @@ impl VideoReader {
         cancellation: &ReadCancellationToken,
         generation: u64,
     ) -> Result<usize, StreamError> {
-        let cancellation = Some((cancellation, generation));
+        let cancellation_context = Some((cancellation, generation));
         let Some(plan) = self.prepare_prefetch_extension(
             source.len(),
             hint_offset,
             hint_length,
-            cancellation,
+            cancellation_context,
         )? else {
             return Ok(0);
         };
@@ -309,11 +312,11 @@ impl VideoReader {
                 plan.offset,
                 plan.fetch_len,
                 self.config.pipeline,
-                cancellation.0.unwrap(),
+                cancellation,
                 generation,
             )
             .await?;
-        self.finish_prefetch_extension(plan, fetched, cancellation)
+        self.finish_prefetch_extension(plan, fetched, cancellation_context)
     }
 
     async fn read_impl<T>(
