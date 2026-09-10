@@ -261,8 +261,7 @@ mod tests {
 
         let second = first_aligned;
         buffer[second + 4..second + 8].copy_from_slice(&2u32.to_le_bytes());
-        buffer[second + 8..second + 12]
-            .copy_from_slice(&(second_name.len() as u32).to_le_bytes());
+        buffer[second + 8..second + 12].copy_from_slice(&(second_name.len() as u32).to_le_bytes());
         buffer[second + 12..second + 12 + second_name.len()].copy_from_slice(&second_name);
 
         let entries = decode_file_names_information(&buffer).unwrap();
