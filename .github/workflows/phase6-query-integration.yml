@@ -1,0 +1,96 @@
+name: Phase 6 Query Integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/smb-client/**'
+      - 'crates/smb-fs/**'
+      - 'crates/smb-probe/**'
+      - 'crates/smb-wire/**'
+      - '.github/workflows/phase6-query-integration.yml'
+  pull_request:
+    paths:
+      - 'crates/smb-client/**'
+      - 'crates/smb-fs/**'
+      - 'crates/smb-probe/**'
+      - 'crates/smb-wire/**'
+      - '.github/workflows/phase6-query-integration.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  query:
+    name: Live QUERY_INFO and QUERY_DIRECTORY
+    runs-on: ubuntu-latest
+    env:
+      SMB_PORT: '1445'
+      SMB_USER: smbtest
+      SMB_PASSWORD: 'XFiles-Rust-SMB-42!'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Samba
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y samba
+          sudo systemctl stop smbd nmbd 2>/dev/null || true
+          sudo pkill smbd 2>/dev/null || true
+
+      - name: Create account and query fixtures
+        run: |
+          set -eux
+          sudo useradd --no-create-home --shell /usr/sbin/nologin "$SMB_USER" 2>/dev/null || true
+          printf '%s\n%s\n' "$SMB_PASSWORD" "$SMB_PASSWORD" | sudo smbpasswd -s -a "$SMB_USER"
+          sudo rm -rf /tmp/smb-phase6-query
+          sudo mkdir -p /tmp/smb-phase6-query
+          printf 'XFILES_PHASE6_QUERY' | sudo tee /tmp/smb-phase6-query/small.bin >/dev/null
+          printf 'SECOND_ENTRY' | sudo tee /tmp/smb-phase6-query/second.txt >/dev/null
+          sudo chown -R "$SMB_USER":"$SMB_USER" /tmp/smb-phase6-query
+          sudo chmod -R a+rX /tmp/smb-phase6-query
+
+      - name: Start signing-required Samba
+        run: |
+          cat > /tmp/smb-phase6.conf <<EOF
+          [global]
+            server role = standalone server
+            workgroup = WORKGROUP
+            security = user
+            map to guest = Never
+            server min protocol = SMB2_10
+            server max protocol = SMB3_11
+            server signing = mandatory
+            smb ports = ${SMB_PORT}
+            interfaces = 127.0.0.1
+            bind interfaces only = yes
+            disable netbios = yes
+            log level = 2
+            log file = /tmp/smb-phase6.log
+
+          [auth]
+            path = /tmp/smb-phase6-query
+            read only = yes
+            guest ok = no
+            valid users = ${SMB_USER}
+          EOF
+          sudo smbd -D -s /tmp/smb-phase6.conf
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/${SMB_PORT}) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/smb-phase6.log || true
+          exit 1
+
+      - name: Verify phase 6 queries
+        run: |
+          set -o pipefail
+          cargo run -p smb-io-probe --example query -- \
+            127.0.0.1 "$SMB_PORT" auth small.bin "$SMB_USER" "$SMB_PASSWORD" \
+            | tee /tmp/phase6-query.log
+          grep -q '^query_info_verified: true$' /tmp/phase6-query.log
+          grep -q '^query_directory_verified: true$' /tmp/phase6-query.log
