@@ -10,7 +10,6 @@ use smb_io_client::{
 use smb_io_fs::{decode_file_names_information, query_standard_information};
 
 const FILE_NAMES_INFORMATION_CLASS: u8 = 0x0c;
-const RESTART_SCANS: u8 = 0x01;
 const QUERY_BUFFER_SIZE: u32 = 64 * 1024;
 
 #[tokio::main]
@@ -68,9 +67,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("directory_root_open_verified: true");
 
     println!("query_directory_first_start: true");
-    let mut first_options =
+    let first_options =
         QueryDirectoryOptions::new(FILE_NAMES_INFORMATION_CLASS, "*", QUERY_BUFFER_SIZE);
-    first_options.flags = RESTART_SCANS;
     let first_buffer = session.query_directory(&directory, first_options).await?;
     let mut entries = decode_file_names_information(&first_buffer)?;
     println!("query_directory_first_bytes: {}", first_buffer.len());
