@@ -61,11 +61,6 @@ impl QueryInfoRequest {
         if self.input_buffer.len() > u32::MAX as usize {
             return Err(WireError::InvalidField("QUERY_INFO InputBufferLength"));
         }
-        if !self.input_buffer.is_empty()
-            && SMB2_HEADER_SIZE + QUERY_INFO_REQUEST_FIXED_SIZE > u16::MAX as usize
-        {
-            return Err(WireError::InvalidField("QUERY_INFO InputBufferOffset"));
-        }
         Ok(())
     }
 
@@ -210,7 +205,10 @@ mod tests {
         assert_eq!(body[2], info_type::FILE);
         assert_eq!(body[3], 0x12);
         assert_eq!(get_u32(body, 4), 4096);
-        assert_eq!(usize::from(get_u16(body, 8)), SMB2_HEADER_SIZE + QUERY_INFO_REQUEST_FIXED_SIZE);
+        assert_eq!(
+            usize::from(get_u16(body, 8)),
+            SMB2_HEADER_SIZE + QUERY_INFO_REQUEST_FIXED_SIZE
+        );
         assert_eq!(get_u32(body, 12), 4);
         assert_eq!(&body[QUERY_INFO_REQUEST_FIXED_SIZE..], &[1, 2, 3, 4]);
     }
