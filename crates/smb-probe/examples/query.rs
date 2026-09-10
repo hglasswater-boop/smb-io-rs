@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
     let entries = read_directory_names(&mut session, &directory).await?;
     let expected_name = path
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .filter(|name| !name.is_empty())
         .ok_or("fixture path has no file name")?;
