@@ -10,7 +10,7 @@ use smb_io_client::{
 use smb_io_fs::{decode_file_names_information, query_standard_information};
 
 const FILE_NAMES_INFORMATION_CLASS: u8 = 0x0c;
-const QUERY_BUFFER_SIZE: u32 = 64 * 1024;
+const QUERY_BUFFER_SIZE: u32 = 65_535;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
