@@ -4,10 +4,14 @@ use std::error::Error;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
-    CloseOptions, Connection, FileOpenOptions, NegotiateConfig, SessionConnection,
-    SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
+    CloseOptions, Connection, FileOpenOptions, NegotiateConfig, QueryDirectoryOptions,
+    SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
 };
-use smb_io_fs::{query_standard_information, read_directory_names};
+use smb_io_fs::{decode_file_names_information, query_standard_information};
+
+const FILE_NAMES_INFORMATION_CLASS: u8 = 0x0c;
+const RESTART_SCANS: u8 = 0x01;
+const QUERY_BUFFER_SIZE: u32 = 64 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -62,8 +66,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .open_file(&tree, "", FileOpenOptions::read_existing_directory())
         .await?;
     println!("directory_root_open_verified: true");
-    println!("query_directory_start: true");
-    let entries = read_directory_names(&mut session, &directory).await?;
+
+    println!("query_directory_first_start: true");
+    let mut first_options =
+        QueryDirectoryOptions::new(FILE_NAMES_INFORMATION_CLASS, "*", QUERY_BUFFER_SIZE);
+    first_options.flags = RESTART_SCANS;
+    let first_buffer = session.query_directory(&directory, first_options).await?;
+    let mut entries = decode_file_names_information(&first_buffer)?;
+    println!("query_directory_first_bytes: {}", first_buffer.len());
+    println!("query_directory_first_entries: {}", entries.len());
+    println!("query_directory_first_verified: true");
+
+    println!("query_directory_continuation_start: true");
+    let continuation_options =
+        QueryDirectoryOptions::new(FILE_NAMES_INFORMATION_CLASS, "", QUERY_BUFFER_SIZE);
+    let continuation_buffer = session
+        .query_directory(&directory, continuation_options)
+        .await?;
+    println!(
+        "query_directory_continuation_bytes: {}",
+        continuation_buffer.len()
+    );
+    if !continuation_buffer.is_empty() {
+        entries.extend(decode_file_names_information(&continuation_buffer)?);
+    }
+    println!("query_directory_continuation_verified: true");
+
     let expected_name = path
         .rsplit(['/', '\\'])
         .next()
