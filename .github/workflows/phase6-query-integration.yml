@@ -67,7 +67,7 @@ jobs:
             interfaces = 127.0.0.1
             bind interfaces only = yes
             disable netbios = yes
-            log level = 2
+            log level = 10
             log file = /tmp/smb-phase6.log
 
           [auth]
@@ -89,8 +89,15 @@ jobs:
       - name: Verify phase 6 queries
         run: |
           set -o pipefail
+          status=0
           cargo run -p smb-io-probe --example query -- \
             127.0.0.1 "$SMB_PORT" auth small.bin "$SMB_USER" "$SMB_PASSWORD" \
-            | tee /tmp/phase6-query.log
+            | tee /tmp/phase6-query.log || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo '--- Samba diagnostics ---'
+            sudo cat /tmp/smb-phase6.log || true
+            exit "$status"
+          fi
           grep -q '^query_info_verified: true$' /tmp/phase6-query.log
+          grep -q '^directory_root_open_verified: true$' /tmp/phase6-query.log
           grep -q '^query_directory_verified: true$' /tmp/phase6-query.log
