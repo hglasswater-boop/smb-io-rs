@@ -16,6 +16,8 @@ mod error;
 mod frame;
 mod header;
 mod negotiate;
+mod query_directory;
+mod query_info;
 mod read;
 mod session_setup;
 mod tree_connect;
@@ -55,6 +57,16 @@ pub use negotiate::{
     Dialect, NEGOTIATE_REQUEST_STRUCTURE_SIZE, NEGOTIATE_RESPONSE_FIXED_SIZE,
     NEGOTIATE_RESPONSE_STRUCTURE_SIZE, NegotiateContext, NegotiateRequest, NegotiateResponse,
     capabilities, context_type, preauth_hash_algorithm, security_mode,
+};
+pub use query_directory::{
+    QUERY_DIRECTORY_REQUEST_FIXED_SIZE, QUERY_DIRECTORY_REQUEST_STRUCTURE_SIZE,
+    QUERY_DIRECTORY_RESPONSE_FIXED_SIZE, QUERY_DIRECTORY_RESPONSE_STRUCTURE_SIZE,
+    QueryDirectoryRequest, QueryDirectoryResponse, file_information_class, query_directory_flags,
+};
+pub use query_info::{
+    QUERY_INFO_REQUEST_FIXED_SIZE, QUERY_INFO_REQUEST_STRUCTURE_SIZE,
+    QUERY_INFO_RESPONSE_FIXED_SIZE, QUERY_INFO_RESPONSE_STRUCTURE_SIZE, QueryInfoRequest,
+    QueryInfoResponse, info_type, query_info_flags,
 };
 pub use read::{
     READ_REQUEST_FIXED_SIZE, READ_REQUEST_STRUCTURE_SIZE, READ_RESPONSE_FIXED_SIZE,
