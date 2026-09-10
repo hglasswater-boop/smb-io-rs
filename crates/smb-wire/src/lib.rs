@@ -64,9 +64,9 @@ pub use query_directory::{
     QueryDirectoryRequest, QueryDirectoryResponse, file_information_class, query_directory_flags,
 };
 pub use query_info::{
-    QUERY_INFO_REQUEST_FIXED_SIZE, QUERY_INFO_REQUEST_STRUCTURE_SIZE, QUERY_INFO_RESPONSE_FIXED_SIZE,
-    QUERY_INFO_RESPONSE_STRUCTURE_SIZE, QueryInfoRequest, QueryInfoResponse, info_type,
-    query_info_flags,
+    QUERY_INFO_REQUEST_FIXED_SIZE, QUERY_INFO_REQUEST_STRUCTURE_SIZE,
+    QUERY_INFO_RESPONSE_FIXED_SIZE, QUERY_INFO_RESPONSE_STRUCTURE_SIZE, QueryInfoRequest,
+    QueryInfoResponse, info_type, query_info_flags,
 };
 pub use read::{
     READ_REQUEST_FIXED_SIZE, READ_REQUEST_STRUCTURE_SIZE, READ_RESPONSE_FIXED_SIZE,
