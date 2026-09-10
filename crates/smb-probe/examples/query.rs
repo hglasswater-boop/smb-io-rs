@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
     let entries = read_directory_names(&mut session, &directory).await?;
     let expected_name = path
-        .rsplit(['/', '\\'])
+        .rsplit(|c| c == '/' || c == '\\')
         .next()
         .filter(|name| !name.is_empty())
         .ok_or("fixture path has no file name")?;
@@ -72,10 +72,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(format!(
-            "QUERY_DIRECTORY did not return {expected_name:?}; entries=[{names}]"
-        )
-        .into());
+        return Err(
+            format!("QUERY_DIRECTORY did not return {expected_name:?}; entries=[{names}]").into(),
+        );
     }
     println!("query_directory_entries: {}", entries.len());
     println!("query_directory_verified: true");
