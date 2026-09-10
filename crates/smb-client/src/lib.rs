@@ -16,6 +16,7 @@ mod file;
 mod message_id;
 mod negotiate;
 mod preauth;
+mod query;
 mod read;
 mod read_async;
 mod reconnect;
@@ -35,6 +36,7 @@ pub use file::{FileHandle, FileOpenOptions, FileOpenResult};
 pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
+pub use query::{QueryDirectoryOptions, QueryInfoOptions, STATUS_NO_MORE_FILES};
 pub use read::{PipelinedReadOptions, ReadOptions, STATUS_END_OF_FILE};
 pub use read_async::STATUS_PENDING;
 pub use reconnect::{
