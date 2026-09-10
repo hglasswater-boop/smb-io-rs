@@ -78,9 +78,8 @@ where
             "QUERY_INFO",
         )?;
 
-        let credit_charge = self.query_credit_charge(
-            options.output_buffer_length.max(input_buffer_length),
-        )?;
+        let credit_charge =
+            self.query_credit_charge(options.output_buffer_length.max(input_buffer_length))?;
         let request = QueryInfoRequest {
             info_type: options.info_type,
             file_info_class: options.file_info_class,
@@ -248,9 +247,7 @@ where
         if !negotiated.supports_multi_credit() && payload_length > CREDIT_UNIT_BYTES {
             return Err(ClientError::Protocol(match operation {
                 "QUERY_INFO" => "QUERY_INFO payload exceeds single-credit 64 KiB limit",
-                "QUERY_DIRECTORY" => {
-                    "QUERY_DIRECTORY payload exceeds single-credit 64 KiB limit"
-                }
+                "QUERY_DIRECTORY" => "QUERY_DIRECTORY payload exceeds single-credit 64 KiB limit",
                 _ => "SMB query payload exceeds single-credit 64 KiB limit",
             }));
         }
@@ -345,9 +342,7 @@ where
             })),
             HeaderId::Async { .. } => Err(ClientError::Protocol(match operation {
                 "QUERY_INFO" => "QUERY_INFO response unexpectedly used async header form",
-                "QUERY_DIRECTORY" => {
-                    "QUERY_DIRECTORY response unexpectedly used async header form"
-                }
+                "QUERY_DIRECTORY" => "QUERY_DIRECTORY response unexpectedly used async header form",
                 _ => "SMB query response unexpectedly used async header form",
             })),
         }
