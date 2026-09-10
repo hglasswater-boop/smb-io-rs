@@ -10,7 +10,7 @@ const FILE_NAMES_INFORMATION_CLASS: u8 = 0x0c;
 const RESTART_SCANS: u8 = 0x01;
 const STANDARD_INFORMATION_SIZE: usize = 24;
 const FILE_NAMES_INFORMATION_FIXED_SIZE: usize = 12;
-const DEFAULT_QUERY_BUFFER_SIZE: u32 = 64 * 1024;
+const DEFAULT_QUERY_BUFFER_SIZE: u32 = 65_535;
 
 #[derive(Debug)]
 pub enum FsQueryError {
