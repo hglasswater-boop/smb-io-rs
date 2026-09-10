@@ -57,9 +57,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("query_info_verified: true");
     session.close_file(file, CloseOptions::default()).await?;
 
+    println!("directory_root_open_start: true");
     let directory = session
         .open_file(&tree, "", FileOpenOptions::read_existing_directory())
         .await?;
+    println!("directory_root_open_verified: true");
+    println!("query_directory_start: true");
     let entries = read_directory_names(&mut session, &directory).await?;
     let expected_name = path
         .rsplit(['/', '\\'])
