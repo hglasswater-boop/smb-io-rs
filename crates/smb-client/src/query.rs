@@ -70,8 +70,17 @@ where
         options: QueryInfoOptions,
     ) -> Result<Vec<u8>, ClientError> {
         self.ensure_query_session()?;
+        let input_buffer_length = u32::try_from(options.input_buffer.len())
+            .map_err(|_| ClientError::Protocol("QUERY_INFO input buffer exceeds u32 length"))?;
         self.validate_query_output_length(options.output_buffer_length)?;
+        self.validate_single_credit_payload(
+            options.output_buffer_length.max(input_buffer_length),
+            "QUERY_INFO",
+        )?;
 
+        let credit_charge = self.query_credit_charge(
+            options.output_buffer_length.max(input_buffer_length),
+        )?;
         let request = QueryInfoRequest {
             info_type: options.info_type,
             file_info_class: options.file_info_class,
@@ -81,7 +90,6 @@ where
             flags: options.flags,
             file_id: file.file_id(),
         };
-        let credit_charge = self.query_credit_charge(options.output_buffer_length)?;
         let credit_request = self
             .connection
             .reserve_credits(credit_charge, options.credit_request)?;
@@ -93,7 +101,7 @@ where
             credit_charge,
             credit_request,
         )?;
-        self.sign_query_request(&mut request_message, "QUERY_INFO")?;
+        self.sign_query_request(&mut request_message)?;
 
         self.connection
             .transport
@@ -136,7 +144,9 @@ where
     ) -> Result<Vec<u8>, ClientError> {
         self.ensure_query_session()?;
         self.validate_query_output_length(options.output_buffer_length)?;
+        self.validate_single_credit_payload(options.output_buffer_length, "QUERY_DIRECTORY")?;
 
+        let credit_charge = self.query_credit_charge(options.output_buffer_length)?;
         let request = QueryDirectoryRequest {
             file_information_class: options.file_information_class,
             flags: options.flags,
@@ -145,7 +155,6 @@ where
             file_name: options.file_name,
             output_buffer_length: options.output_buffer_length,
         };
-        let credit_charge = self.query_credit_charge(options.output_buffer_length)?;
         let credit_request = self
             .connection
             .reserve_credits(credit_charge, options.credit_request)?;
@@ -157,7 +166,7 @@ where
             credit_charge,
             credit_request,
         )?;
-        self.sign_query_request(&mut request_message, "QUERY_DIRECTORY")?;
+        self.sign_query_request(&mut request_message)?;
 
         self.connection
             .transport
@@ -213,7 +222,9 @@ where
             .connection
             .negotiated
             .as_ref()
-            .ok_or(ClientError::Protocol("SMB query requires negotiated parameters"))?;
+            .ok_or(ClientError::Protocol(
+                "SMB query requires negotiated parameters",
+            ))?;
         if output_buffer_length > negotiated.max_transact_size {
             return Err(ClientError::Protocol(
                 "SMB query output buffer exceeds negotiated MaxTransactSize",
@@ -222,32 +233,53 @@ where
         Ok(())
     }
 
-    fn query_credit_charge(&self, output_buffer_length: u32) -> Result<u16, ClientError> {
+    fn validate_single_credit_payload(
+        &self,
+        payload_length: u32,
+        operation: &'static str,
+    ) -> Result<(), ClientError> {
         let negotiated = self
             .connection
             .negotiated
             .as_ref()
-            .ok_or(ClientError::Protocol("SMB query requires negotiated parameters"))?;
+            .ok_or(ClientError::Protocol(
+                "SMB query requires negotiated parameters",
+            ))?;
+        if !negotiated.supports_multi_credit() && payload_length > CREDIT_UNIT_BYTES {
+            return Err(ClientError::Protocol(match operation {
+                "QUERY_INFO" => "QUERY_INFO payload exceeds single-credit 64 KiB limit",
+                "QUERY_DIRECTORY" => {
+                    "QUERY_DIRECTORY payload exceeds single-credit 64 KiB limit"
+                }
+                _ => "SMB query payload exceeds single-credit 64 KiB limit",
+            }));
+        }
+        Ok(())
+    }
+
+    fn query_credit_charge(&self, payload_length: u32) -> Result<u16, ClientError> {
+        let negotiated = self
+            .connection
+            .negotiated
+            .as_ref()
+            .ok_or(ClientError::Protocol(
+                "SMB query requires negotiated parameters",
+            ))?;
         if !negotiated.supports_multi_credit() {
             return Ok(0);
         }
-        let units = output_buffer_length.saturating_sub(1) / CREDIT_UNIT_BYTES + 1;
+        let units = payload_length.saturating_sub(1) / CREDIT_UNIT_BYTES + 1;
         u16::try_from(units)
             .map_err(|_| ClientError::Protocol("SMB query CreditCharge exceeds u16"))
     }
 
-    fn sign_query_request(
-        &self,
-        message: &mut [u8],
-        operation: &'static str,
-    ) -> Result<(), ClientError> {
+    fn sign_query_request(&self, message: &mut [u8]) -> Result<(), ClientError> {
         if self.signing_required {
             let signing = self.signing.as_ref().ok_or(ClientError::Protocol(
                 "SMB query requires signing but the session has no signing key",
             ))?;
             signing.sign(message)?;
         }
-        let _ = operation;
         Ok(())
     }
 
@@ -290,18 +322,14 @@ where
         if header.message_id != message_id {
             return Err(ClientError::Protocol(match operation {
                 "QUERY_INFO" => "QUERY_INFO response MessageId does not match request",
-                "QUERY_DIRECTORY" => {
-                    "QUERY_DIRECTORY response MessageId does not match request"
-                }
+                "QUERY_DIRECTORY" => "QUERY_DIRECTORY response MessageId does not match request",
                 _ => "SMB query response MessageId does not match request",
             }));
         }
         if header.session_id != self.session_id {
             return Err(ClientError::Protocol(match operation {
                 "QUERY_INFO" => "QUERY_INFO response SessionId does not match session",
-                "QUERY_DIRECTORY" => {
-                    "QUERY_DIRECTORY response SessionId does not match session"
-                }
+                "QUERY_DIRECTORY" => "QUERY_DIRECTORY response SessionId does not match session",
                 _ => "SMB query response SessionId does not match session",
             }));
         }
