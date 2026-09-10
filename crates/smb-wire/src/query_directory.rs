@@ -64,14 +64,14 @@ impl QueryDirectoryRequest {
                 "QUERY_DIRECTORY FileName must not contain NUL",
             ));
         }
-        let file_name_len = self
-            .file_name
-            .encode_utf16()
-            .count()
-            .checked_mul(2)
-            .ok_or(WireError::InvalidField(
-                "QUERY_DIRECTORY FileNameLength overflow",
-            ))?;
+        let file_name_len =
+            self.file_name
+                .encode_utf16()
+                .count()
+                .checked_mul(2)
+                .ok_or(WireError::InvalidField(
+                    "QUERY_DIRECTORY FileNameLength overflow",
+                ))?;
         if file_name_len > u16::MAX as usize {
             return Err(WireError::InvalidField("QUERY_DIRECTORY FileNameLength"));
         }
