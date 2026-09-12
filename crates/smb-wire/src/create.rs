@@ -211,14 +211,13 @@ impl CreateRequest {
         put_u32(&mut body, 36, self.create_disposition);
         put_u32(&mut body, 40, self.create_options);
 
+        let name_offset = u16::try_from(SMB2_HEADER_SIZE + CREATE_REQUEST_FIXED_SIZE)
+            .map_err(|_| WireError::InvalidField("CREATE NameOffset"))?;
+        put_u16(&mut body, 44, name_offset);
         if name.is_empty() {
-            put_u16(&mut body, 44, 0);
             put_u16(&mut body, 46, 0);
             body.push(0);
         } else {
-            let name_offset = u16::try_from(SMB2_HEADER_SIZE + CREATE_REQUEST_FIXED_SIZE)
-                .map_err(|_| WireError::InvalidField("CREATE NameOffset"))?;
-            put_u16(&mut body, 44, name_offset);
             put_u16(
                 &mut body,
                 46,
@@ -365,6 +364,15 @@ mod tests {
             usize::from(get_u16(&body, 46)),
             "movies\\sample.mkv".encode_utf16().count() * 2
         );
+    }
+
+    #[test]
+    fn root_open_keeps_buffer_offset_with_zero_name_length() {
+        let request = CreateRequest::open_existing_read("");
+        let body = request.encode_body().unwrap();
+        assert_eq!(body.len(), CREATE_REQUEST_FIXED_SIZE + 1);
+        assert_eq!(get_u16(&body, 44), 120);
+        assert_eq!(get_u16(&body, 46), 0);
     }
 
     #[test]
