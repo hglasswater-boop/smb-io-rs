@@ -8,7 +8,8 @@
 mod query;
 
 pub use query::{
-    DirectoryNameEntry, FileStandardInformation, FsQueryError, decode_file_names_information,
+    DirectoryNameEntry, FileStandardInformation, FsQueryError,
+    decode_file_id_full_directory_information, decode_file_names_information,
     query_standard_information, read_directory_names, read_directory_names_matching,
 };
 
