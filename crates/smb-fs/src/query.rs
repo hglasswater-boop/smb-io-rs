@@ -6,7 +6,6 @@ use smb_io_client::{
 };
 
 const FILE_STANDARD_INFORMATION_CLASS: u8 = 0x05;
-const FILE_NAMES_INFORMATION_CLASS: u8 = 0x0c;
 const FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS: u8 = 0x26;
 const STANDARD_INFORMATION_SIZE: usize = 24;
 const FILE_NAMES_INFORMATION_FIXED_SIZE: usize = 12;
@@ -197,8 +196,8 @@ pub fn decode_file_id_full_directory_information(
         }
 
         let mut units = Vec::with_capacity(file_name_length / 2);
-        for pair in remaining[FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE..name_end]
-            .chunks_exact(2)
+        for pair in
+            remaining[FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE..name_end].chunks_exact(2)
         {
             units.push(u16::from_le_bytes([pair[0], pair[1]]));
         }
