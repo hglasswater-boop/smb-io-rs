@@ -7,9 +7,11 @@ use smb_io_client::{
 
 const FILE_STANDARD_INFORMATION_CLASS: u8 = 0x05;
 const FILE_NAMES_INFORMATION_CLASS: u8 = 0x0c;
-const RESTART_SCANS: u8 = 0x01;
+const FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS: u8 = 0x26;
 const STANDARD_INFORMATION_SIZE: usize = 24;
 const FILE_NAMES_INFORMATION_FIXED_SIZE: usize = 12;
+const FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE: usize = 80;
+const FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET: usize = 60;
 const DEFAULT_QUERY_BUFFER_SIZE: u32 = 65_535;
 
 #[derive(Debug)]
@@ -136,7 +138,7 @@ pub fn decode_file_names_information(
         if next_entry_offset == 0 {
             break;
         }
-        if next_entry_offset < FILE_NAMES_INFORMATION_FIXED_SIZE
+        if next_entry_offset < name_end
             || next_entry_offset > remaining.len()
             || next_entry_offset % 8 != 0
         {
@@ -148,6 +150,76 @@ pub fn decode_file_names_information(
             .checked_add(next_entry_offset)
             .ok_or(FsQueryError::InvalidData(
                 "FileNamesInformation NextEntryOffset overflow",
+            ))?;
+    }
+
+    Ok(entries)
+}
+
+pub fn decode_file_id_full_directory_information(
+    buffer: &[u8],
+) -> Result<Vec<DirectoryNameEntry>, FsQueryError> {
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < buffer.len() {
+        let remaining = &buffer[offset..];
+        if remaining.len() < FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE {
+            return Err(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation entry is shorter than 80 bytes",
+            ));
+        }
+
+        let next_entry_offset =
+            u32::from_le_bytes(remaining[0..4].try_into().expect("fixed range")) as usize;
+        let file_index = u32::from_le_bytes(remaining[4..8].try_into().expect("fixed range"));
+        let file_name_length = u32::from_le_bytes(
+            remaining[FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET
+                ..FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET + 4]
+                .try_into()
+                .expect("fixed range"),
+        ) as usize;
+        if file_name_length % 2 != 0 {
+            return Err(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation FileNameLength is not UTF-16 aligned",
+            ));
+        }
+
+        let name_end = FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE
+            .checked_add(file_name_length)
+            .ok_or(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation FileNameLength overflow",
+            ))?;
+        if name_end > remaining.len() {
+            return Err(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation file name exceeds response buffer",
+            ));
+        }
+
+        let mut units = Vec::with_capacity(file_name_length / 2);
+        for pair in remaining[FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE..name_end]
+            .chunks_exact(2)
+        {
+            units.push(u16::from_le_bytes([pair[0], pair[1]]));
+        }
+        let name = String::from_utf16(&units).map_err(|_| FsQueryError::InvalidUtf16)?;
+        entries.push(DirectoryNameEntry { file_index, name });
+
+        if next_entry_offset == 0 {
+            break;
+        }
+        if next_entry_offset < name_end
+            || next_entry_offset > remaining.len()
+            || next_entry_offset % 8 != 0
+        {
+            return Err(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation NextEntryOffset is invalid",
+            ));
+        }
+        offset = offset
+            .checked_add(next_entry_offset)
+            .ok_or(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation NextEntryOffset overflow",
             ))?;
     }
 
@@ -200,19 +272,16 @@ where
     let mut entries = Vec::new();
     let mut first = true;
     loop {
-        let mut options = QueryDirectoryOptions::new(
-            FILE_NAMES_INFORMATION_CLASS,
+        let options = QueryDirectoryOptions::new(
+            FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
             if first { pattern } else { "" },
             DEFAULT_QUERY_BUFFER_SIZE,
         );
-        if first {
-            options.flags = RESTART_SCANS;
-        }
         let buffer = session.query_directory(directory, options).await?;
         if buffer.is_empty() {
             break;
         }
-        entries.extend(decode_file_names_information(&buffer)?);
+        entries.extend(decode_file_id_full_directory_information(&buffer)?);
         first = false;
     }
     Ok(entries)
@@ -271,9 +340,68 @@ mod tests {
     }
 
     #[test]
+    fn decodes_multiple_file_id_full_names_using_next_entry_offsets() {
+        let first_name: Vec<u8> = "one.txt"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let second_name: Vec<u8> = "two.mkv"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let first_size = FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE + first_name.len();
+        let first_aligned = (first_size + 7) & !7;
+        let second_size = FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE + second_name.len();
+        let mut buffer = vec![0u8; first_aligned + second_size];
+
+        buffer[0..4].copy_from_slice(&(first_aligned as u32).to_le_bytes());
+        buffer[4..8].copy_from_slice(&11u32.to_le_bytes());
+        buffer[FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET
+            ..FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET + 4]
+            .copy_from_slice(&(first_name.len() as u32).to_le_bytes());
+        buffer[FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE
+            ..FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE + first_name.len()]
+            .copy_from_slice(&first_name);
+
+        let second = first_aligned;
+        buffer[second + 4..second + 8].copy_from_slice(&22u32.to_le_bytes());
+        buffer[second + FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET
+            ..second + FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET + 4]
+            .copy_from_slice(&(second_name.len() as u32).to_le_bytes());
+        buffer[second + FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE
+            ..second + FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE + second_name.len()]
+            .copy_from_slice(&second_name);
+
+        let entries = decode_file_id_full_directory_information(&buffer).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].file_index, 11);
+        assert_eq!(entries[0].name, "one.txt");
+        assert_eq!(entries[1].file_index, 22);
+        assert_eq!(entries[1].name, "two.mkv");
+    }
+
+    #[test]
     fn rejects_unaligned_next_entry_offset() {
         let mut buffer = vec![0u8; 24];
         buffer[0..4].copy_from_slice(&13u32.to_le_bytes());
         assert!(decode_file_names_information(&buffer).is_err());
+    }
+
+    #[test]
+    fn rejects_overlapping_file_id_full_next_entry_offset() {
+        let name: Vec<u8> = "overlap.txt"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut buffer = vec![0u8; 128];
+        buffer[0..4].copy_from_slice(&80u32.to_le_bytes());
+        buffer[FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET
+            ..FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET + 4]
+            .copy_from_slice(&(name.len() as u32).to_le_bytes());
+        buffer[FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE
+            ..FILE_ID_FULL_DIRECTORY_INFORMATION_FIXED_SIZE + name.len()]
+            .copy_from_slice(&name);
+
+        assert!(decode_file_id_full_directory_information(&buffer).is_err());
     }
 }
