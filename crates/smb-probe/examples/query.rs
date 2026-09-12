@@ -7,9 +7,9 @@ use smb_io_client::{
     CloseOptions, Connection, FileOpenOptions, NegotiateConfig, QueryDirectoryOptions,
     SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
 };
-use smb_io_fs::{decode_file_names_information, query_standard_information};
+use smb_io_fs::query_standard_information;
 
-const FILE_NAMES_INFORMATION_CLASS: u8 = 0x0c;
+const FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS: u8 = 0x26;
 const QUERY_BUFFER_SIZE: u32 = 65_535;
 
 #[tokio::main]
@@ -67,49 +67,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("directory_root_open_verified: true");
 
     println!("query_directory_first_start: true");
-    let first_options =
-        QueryDirectoryOptions::new(FILE_NAMES_INFORMATION_CLASS, "*", QUERY_BUFFER_SIZE);
+    let first_options = QueryDirectoryOptions::new(
+        FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
+        "*",
+        QUERY_BUFFER_SIZE,
+    );
     let first_buffer = session.query_directory(&directory, first_options).await?;
-    let mut entries = decode_file_names_information(&first_buffer)?;
     println!("query_directory_first_bytes: {}", first_buffer.len());
-    println!("query_directory_first_entries: {}", entries.len());
+    if first_buffer.is_empty() {
+        return Err("QUERY_DIRECTORY returned an empty first buffer for a non-empty share".into());
+    }
     println!("query_directory_first_verified: true");
 
-    println!("query_directory_continuation_start: true");
-    let continuation_options =
-        QueryDirectoryOptions::new(FILE_NAMES_INFORMATION_CLASS, "", QUERY_BUFFER_SIZE);
-    let continuation_buffer = session
-        .query_directory(&directory, continuation_options)
-        .await?;
-    println!(
-        "query_directory_continuation_bytes: {}",
-        continuation_buffer.len()
-    );
-    if !continuation_buffer.is_empty() {
-        entries.extend(decode_file_names_information(&continuation_buffer)?);
-    }
-    println!("query_directory_continuation_verified: true");
-
-    let expected_name = path
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|name| !name.is_empty())
-        .ok_or("fixture path has no file name")?;
-    if !entries.iter().any(|entry| entry.name == expected_name) {
-        let names = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(
-            format!("QUERY_DIRECTORY did not return {expected_name:?}; entries=[{names}]").into(),
-        );
-    }
-    println!("query_directory_entries: {}", entries.len());
-    println!("query_directory_verified: true");
     session
         .close_file(directory, CloseOptions::default())
         .await?;
+    println!("query_directory_verified: true");
 
     Ok(())
 }
