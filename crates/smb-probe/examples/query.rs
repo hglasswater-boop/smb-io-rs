@@ -4,13 +4,10 @@ use std::error::Error;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
-    CloseOptions, Connection, FileOpenOptions, NegotiateConfig, QueryDirectoryOptions,
-    SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
+    CloseOptions, Connection, FileOpenOptions, NegotiateConfig, SessionConnection,
+    SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
 };
-use smb_io_fs::query_standard_information;
-
-const FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS: u8 = 0x26;
-const QUERY_BUFFER_SIZE: u32 = 65_535;
+use smb_io_fs::{query_standard_information, read_directory_names};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -66,23 +63,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
     println!("directory_root_open_verified: true");
 
-    println!("query_directory_first_start: true");
-    let first_options = QueryDirectoryOptions::new(
-        FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
-        "*",
-        QUERY_BUFFER_SIZE,
-    );
-    let first_buffer = session.query_directory(&directory, first_options).await?;
-    println!("query_directory_first_bytes: {}", first_buffer.len());
-    if first_buffer.is_empty() {
-        return Err("QUERY_DIRECTORY returned an empty first buffer for a non-empty share".into());
+    println!("query_directory_enumeration_start: true");
+    let entries = read_directory_names(&mut session, &directory).await?;
+    let expected_name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .ok_or("fixture path has no file name")?;
+    if !entries.iter().any(|entry| entry.name == expected_name) {
+        let names = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(
+            format!("QUERY_DIRECTORY did not return {expected_name:?}; entries=[{names}]").into(),
+        );
     }
-    println!("query_directory_first_verified: true");
-
+    println!("query_directory_entries: {}", entries.len());
+    println!("query_directory_verified: true");
     session
         .close_file(directory, CloseOptions::default())
         .await?;
-    println!("query_directory_verified: true");
 
     Ok(())
 }
