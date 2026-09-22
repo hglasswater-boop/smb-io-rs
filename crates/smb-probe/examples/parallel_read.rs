@@ -100,10 +100,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    println!("parallel_read_requests_sent: {}", result.stats.requests_sent);
-    println!("parallel_read_responses_completed: {}", result.stats.responses_completed);
-    println!("parallel_read_peak_in_flight: {}", result.stats.peak_in_flight);
-    println!("parallel_read_credit_stalls: {}", result.stats.credit_stalls);
+    println!(
+        "parallel_read_requests_sent: {}",
+        result.stats.requests_sent
+    );
+    println!(
+        "parallel_read_responses_completed: {}",
+        result.stats.responses_completed
+    );
+    println!(
+        "parallel_read_peak_in_flight: {}",
+        result.stats.peak_in_flight
+    );
+    println!(
+        "parallel_read_credit_stalls: {}",
+        result.stats.credit_stalls
+    );
     println!(
         "available_credits_after: {}",
         session.available_credits().unwrap_or(0)
@@ -135,7 +147,11 @@ async fn establish_session(
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" { String::new() } else { value }
+    if value == "-" {
+        String::new()
+    } else {
+        value
+    }
 }
 
 fn usage() -> String {
