@@ -264,16 +264,17 @@ where
 {
     if pattern.is_empty() {
         return Err(FsQueryError::InvalidData(
-            "directory search pattern must not be empty on the first query",
+            "directory search pattern must not be empty",
         ));
     }
 
     let mut entries = Vec::new();
-    let mut first = true;
     loop {
+        // Samba expects the search pattern to remain present on continuation requests.
+        // With RESTART_SCANS clear, the server still advances its directory cursor.
         let options = QueryDirectoryOptions::new(
             FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
-            if first { pattern } else { "" },
+            pattern,
             DEFAULT_QUERY_BUFFER_SIZE,
         );
         let buffer = session.query_directory(directory, options).await?;
@@ -281,7 +282,6 @@ where
             break;
         }
         entries.extend(decode_file_id_full_directory_information(&buffer)?);
-        first = false;
     }
     Ok(entries)
 }
