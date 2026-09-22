@@ -28,6 +28,7 @@ jobs:
       SMB_PORT: '1445'
       SMB_USER: smbtest
       SMB_PASSWORD: 'XFiles-Rust-SMB-42!'
+      RUST_BACKTRACE: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -92,7 +93,7 @@ jobs:
           status=0
           cargo run -p smb-io-probe --example query -- \
             127.0.0.1 "$SMB_PORT" auth small.bin "$SMB_USER" "$SMB_PASSWORD" \
-            | tee /tmp/phase6-query.log || status=$?
+            2>&1 | tee /tmp/phase6-query.log || status=$?
           if [ "$status" -ne 0 ]; then
             echo '--- Samba diagnostics ---'
             sudo cat /tmp/smb-phase6.log || true
@@ -101,3 +102,19 @@ jobs:
           grep -q '^query_info_verified: true$' /tmp/phase6-query.log
           grep -q '^directory_root_open_verified: true$' /tmp/phase6-query.log
           grep -q '^query_directory_verified: true$' /tmp/phase6-query.log
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p /tmp/phase6-diagnostics
+          cp /tmp/phase6-query.log /tmp/phase6-diagnostics/phase6-query.log 2>/dev/null || true
+          sudo cp /tmp/smb-phase6.log /tmp/phase6-diagnostics/smb-phase6.log 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" /tmp/phase6-diagnostics
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-query-diagnostics
+          path: /tmp/phase6-diagnostics
+          if-no-files-found: warn
