@@ -4,8 +4,9 @@ const DEFAULT_TARGET_CREDITS: u32 = 128;
 
 /// Tracks the number of SMB credits currently available on one transport connection.
 ///
-/// The current request engine is serial, so this is deliberately small and deterministic. The
-/// same accounting object can later gate a pipelined dispatcher with a semaphore-like wait queue.
+/// Request schedulers reserve from this connection-wide budget before sending and return server
+/// grants after each response. Pipelined callers can therefore treat `available()` as a
+/// semaphore-like send budget without ever exceeding the credits granted by the server.
 #[derive(Debug, Clone)]
 pub struct CreditManager {
     available: u32,
