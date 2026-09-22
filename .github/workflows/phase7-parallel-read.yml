@@ -16,7 +16,7 @@ jobs:
       SMB_PORT: '1445'
       SMB_USER: smbtest
       SMB_PASSWORD: smbtest-ci-password
-      FIXTURE_SIZE: '4194304'
+      FIXTURE_SIZE: '33554432'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -35,9 +35,11 @@ jobs:
           sudo rm -rf /tmp/smb-phase7-read
           sudo mkdir -p /tmp/smb-phase7-read
           python3 - <<'PY'
-          size = 4 * 1024 * 1024
+          size = 32 * 1024 * 1024
+          pattern = bytes(((i * 31 + 7) % 251) for i in range(251))
+          data = (pattern * ((size + len(pattern) - 1) // len(pattern)))[:size]
           with open('/tmp/parallel.bin', 'wb') as handle:
-              handle.write(bytes(((i * 31 + 7) % 251) for i in range(size)))
+              handle.write(data)
           PY
           sudo mv /tmp/parallel.bin /tmp/smb-phase7-read/parallel.bin
           sudo chown -R "$SMB_USER":"$SMB_USER" /tmp/smb-phase7-read
