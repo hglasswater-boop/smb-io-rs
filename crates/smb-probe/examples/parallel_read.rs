@@ -8,6 +8,9 @@ use smb_io_client::{
     SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
 };
 
+const CHUNK_SIZE: usize = 256 * 1024;
+const MAX_IN_FLIGHT: usize = 8;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
@@ -59,8 +62,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             0,
             expected_len,
             PipelinedReadOptions {
-                chunk_size: 256 * 1024,
-                max_in_flight: 8,
+                chunk_size: CHUNK_SIZE,
+                max_in_flight: MAX_IN_FLIGHT,
                 credit_request: 64,
             },
         )
@@ -82,8 +85,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .into());
         }
     }
-    if result.stats.requests_sent < 2 {
-        return Err("parallel READ fixture did not require multiple SMB READ requests".into());
+
+    let minimum_requests = expected_len.div_ceil(CHUNK_SIZE).max(2);
+    if result.stats.requests_sent < minimum_requests {
+        return Err(format!(
+            "parallel READ did not split as expected: sent={}, minimum={minimum_requests}",
+            result.stats.requests_sent
+        )
+        .into());
     }
     if result.stats.peak_in_flight < 2 {
         return Err(format!(
@@ -100,6 +109,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
+    println!("parallel_read_minimum_requests: {minimum_requests}");
     println!(
         "parallel_read_requests_sent: {}",
         result.stats.requests_sent
@@ -147,11 +157,7 @@ async fn establish_session(
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" {
-        String::new()
-    } else {
-        value
-    }
+    if value == "-" { String::new() } else { value }
 }
 
 fn usage() -> String {
