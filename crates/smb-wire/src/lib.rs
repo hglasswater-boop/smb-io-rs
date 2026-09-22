@@ -21,6 +21,7 @@ mod query_info;
 mod read;
 mod session_setup;
 mod tree_connect;
+mod write;
 
 pub use cancel::{CANCEL_REQUEST_FIXED_SIZE, CANCEL_REQUEST_STRUCTURE_SIZE, CancelRequest};
 pub use close::{
@@ -82,6 +83,11 @@ pub use tree_connect::{
     TREE_CONNECT_REQUEST_FIXED_SIZE, TREE_CONNECT_REQUEST_STRUCTURE_SIZE,
     TREE_CONNECT_RESPONSE_FIXED_SIZE, TREE_CONNECT_RESPONSE_STRUCTURE_SIZE, TreeConnectRequest,
     TreeConnectResponse, share_capabilities, share_flags, share_type, tree_connect_flags,
+};
+pub use write::{
+    WRITE_DEFAULT_DATA_OFFSET, WRITE_REQUEST_FIXED_SIZE, WRITE_REQUEST_STRUCTURE_SIZE,
+    WRITE_RESPONSE_FIXED_SIZE, WRITE_RESPONSE_STRUCTURE_SIZE, WriteRequest, WriteResponse,
+    write_channel, write_flags,
 };
 
 /// SMB2 protocol identifier (`0xFE 'S' 'M' 'B'`).
