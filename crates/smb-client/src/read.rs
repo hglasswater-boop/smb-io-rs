@@ -236,7 +236,9 @@ where
     /// The scheduler is credit-driven rather than batch-driven: it fills the current credit/window
     /// allowance, consumes whichever response arrives next, applies that response's credit grant,
     /// and immediately fills newly available capacity. Responses are correlated through an
-    /// explicit MessageId table and reassembled in file order.
+    /// explicit MessageId table and reassembled in file order. On a terminal server-status error,
+    /// no new READs are issued and every already-sent READ is drained before the first error is
+    /// returned so the framed transport is not left with stale responses.
     pub async fn read_at_pipelined(
         &mut self,
         file: &FileHandle,
@@ -291,11 +293,13 @@ where
         let mut completed: Vec<Option<Vec<u8>>> = Vec::new();
         let mut scheduled_bytes = 0usize;
         let mut short_response_at: Option<usize> = None;
+        let mut first_server_error: Option<u32> = None;
         let mut stats = PipelinedReadStats::default();
 
         loop {
             let mut stalled_for_credit = false;
-            while short_response_at.is_none()
+            while first_server_error.is_none()
+                && short_response_at.is_none()
                 && outstanding.len() < options.max_in_flight
                 && scheduled_bytes < target
             {
@@ -372,6 +376,9 @@ where
             }
 
             if outstanding.is_empty() {
+                if let Some(status) = first_server_error {
+                    return Err(ClientError::ServerStatus(status));
+                }
                 if short_response_at.is_some() || scheduled_bytes >= target {
                     break;
                 }
@@ -405,25 +412,37 @@ where
 
             let data = match header.status {
                 StatusField::Status(0) => {
-                    let response = ReadResponse::decode_message(&response_message)?;
-                    if response.data.len() > chunk_len {
-                        return Err(ClientError::Protocol(
-                            "READ response returned more data than requested",
-                        ));
+                    if first_server_error.is_some() {
+                        Vec::new()
+                    } else {
+                        let response = ReadResponse::decode_message(&response_message)?;
+                        if response.data.len() > chunk_len {
+                            return Err(ClientError::Protocol(
+                                "READ response returned more data than requested",
+                            ));
+                        }
+                        if response.data.len() < chunk_len {
+                            short_response_at = Some(
+                                short_response_at.map_or(position, |current| current.min(position)),
+                            );
+                        }
+                        response.data
                     }
-                    if response.data.len() < chunk_len {
+                }
+                StatusField::Status(STATUS_END_OF_FILE) => {
+                    if first_server_error.is_none() {
                         short_response_at = Some(
                             short_response_at.map_or(position, |current| current.min(position)),
                         );
                     }
-                    response.data
-                }
-                StatusField::Status(STATUS_END_OF_FILE) => {
-                    short_response_at =
-                        Some(short_response_at.map_or(position, |current| current.min(position)));
                     Vec::new()
                 }
-                StatusField::Status(status) => return Err(ClientError::ServerStatus(status)),
+                StatusField::Status(status) => {
+                    if first_server_error.is_none() {
+                        first_server_error = Some(status);
+                    }
+                    Vec::new()
+                }
                 StatusField::ChannelSequence { .. } => {
                     return Err(ClientError::Protocol(
                         "READ response used request header form",
