@@ -37,7 +37,9 @@ pub use message_id::MessageIdAllocator;
 pub use negotiate::{Connection, NegotiateConfig, NegotiatedParameters};
 pub use preauth::PreauthIntegrityHash;
 pub use query::{QueryDirectoryOptions, QueryInfoOptions, STATUS_NO_MORE_FILES};
-pub use read::{PipelinedReadOptions, ReadOptions, STATUS_END_OF_FILE};
+pub use read::{
+    PipelinedReadOptions, PipelinedReadResult, PipelinedReadStats, ReadOptions, STATUS_END_OF_FILE,
+};
 pub use read_async::STATUS_PENDING;
 pub use reconnect::{
     ReadOnlyReconnectRecipe, ReconnectError, STATUS_NETWORK_NAME_DELETED,

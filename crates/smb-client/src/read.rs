@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use smb_io_wire::{ReadRequest, ReadResponse, Smb2Header, StatusField, flags, session_flags};
 
 use crate::read_async::{AsyncReadState, ReadResponsePhase};
@@ -24,7 +26,7 @@ impl Default for ReadOptions {
 pub struct PipelinedReadOptions {
     /// Maximum payload carried by one outstanding READ request.
     pub chunk_size: usize,
-    /// Maximum number of READ requests sent before collecting responses.
+    /// Maximum number of READ requests simultaneously outstanding on the connection.
     pub max_in_flight: usize,
     /// Minimum number of credits to request back from the server on each READ.
     pub credit_request: u16,
@@ -40,11 +42,74 @@ impl Default for PipelinedReadOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct PipelinedReadStats {
+    pub requests_sent: usize,
+    pub responses_completed: usize,
+    pub peak_in_flight: usize,
+    /// Number of scheduler turns where no credit was available while at least one READ was still
+    /// outstanding. In that state the scheduler waits for a response and resumes from its grant.
+    pub credit_stalls: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PipelinedReadResult {
+    pub data: Vec<u8>,
+    pub stats: PipelinedReadStats,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PendingRead {
-    message_id: u64,
+    position: usize,
     chunk_len: usize,
     async_state: AsyncReadState,
+}
+
+#[derive(Debug)]
+struct OutstandingReads {
+    by_message_id: HashMap<u64, PendingRead>,
+}
+
+impl OutstandingReads {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            by_message_id: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.by_message_id.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_message_id.is_empty()
+    }
+
+    fn insert(&mut self, message_id: u64, request: PendingRead) -> Result<(), ClientError> {
+        if self.by_message_id.contains_key(&message_id) {
+            return Err(ClientError::Protocol(
+                "pipelined READ reused an outstanding MessageId",
+            ));
+        }
+        self.by_message_id.insert(message_id, request);
+        Ok(())
+    }
+
+    fn get_mut(&mut self, message_id: u64) -> Result<&mut PendingRead, ClientError> {
+        self.by_message_id
+            .get_mut(&message_id)
+            .ok_or(ClientError::Protocol(
+                "pipelined READ response MessageId is not outstanding",
+            ))
+    }
+
+    fn finish(&mut self, message_id: u64) -> Result<PendingRead, ClientError> {
+        self.by_message_id
+            .remove(&message_id)
+            .ok_or(ClientError::Protocol(
+                "pipelined READ received a duplicate or unknown final response",
+            ))
+    }
 }
 
 impl<T> SessionConnection<T>
@@ -166,11 +231,14 @@ where
         Ok(out)
     }
 
-    /// Reads a random-access window with several SMB READ requests outstanding at once.
+    /// Reads a random-access window while keeping several SMB READ requests outstanding.
     ///
-    /// Requests are sent back-to-back before responses are collected. SMB servers may complete
-    /// them out of order or transition an individual request through STATUS_PENDING, so responses
-    /// are correlated by MessageId/AsyncId and reassembled in file order.
+    /// The scheduler is credit-driven rather than batch-driven: it fills the current credit/window
+    /// allowance, consumes whichever response arrives next, applies that response's credit grant,
+    /// and immediately fills newly available capacity. Responses are correlated through an
+    /// explicit MessageId table and reassembled in file order. On a terminal server-status error,
+    /// no new READs are issued and every already-sent READ is drained before the first error is
+    /// returned so the framed transport is not left with stale responses.
     pub async fn read_at_pipelined(
         &mut self,
         file: &FileHandle,
@@ -188,8 +256,24 @@ where
         length: usize,
         options: PipelinedReadOptions,
     ) -> Result<Vec<u8>, ClientError> {
+        Ok(self
+            .read_at_pipelined_with_stats(file, offset, length, options)
+            .await?
+            .data)
+    }
+
+    pub async fn read_at_pipelined_with_stats(
+        &mut self,
+        file: &FileHandle,
+        offset: u64,
+        length: usize,
+        options: PipelinedReadOptions,
+    ) -> Result<PipelinedReadResult, ClientError> {
         if length == 0 || offset >= file.len() {
-            return Ok(Vec::new());
+            return Ok(PipelinedReadResult {
+                data: Vec::new(),
+                stats: PipelinedReadStats::default(),
+            });
         }
         if options.chunk_size == 0 {
             return Err(ClientError::Protocol(
@@ -204,17 +288,26 @@ where
         self.ensure_read_session()?;
 
         let target = read_target_len(file, offset, length)?;
-        let mut out = Vec::with_capacity(target);
+        let (supports_multi_credit, max_read_size) = self.read_limits()?;
+        let mut outstanding = OutstandingReads::with_capacity(options.max_in_flight);
+        let mut completed: Vec<Option<Vec<u8>>> = Vec::new();
+        let mut scheduled_bytes = 0usize;
+        let mut short_response_at: Option<usize> = None;
+        let mut first_server_error: Option<u32> = None;
+        let mut stats = PipelinedReadStats::default();
 
-        while out.len() < target {
-            let (supports_multi_credit, max_read_size) = self.read_limits()?;
-            let mut pending = Vec::with_capacity(options.max_in_flight);
-            let mut scheduled = 0usize;
-            let remaining = target - out.len();
-
-            while pending.len() < options.max_in_flight && scheduled < remaining {
+        loop {
+            let mut stalled_for_credit = false;
+            while first_server_error.is_none()
+                && short_response_at.is_none()
+                && outstanding.len() < options.max_in_flight
+                && scheduled_bytes < target
+            {
                 let available_credits = match self.connection.available_credits() {
-                    Some(0) => break,
+                    Some(0) => {
+                        stalled_for_credit = true;
+                        break;
+                    }
                     Some(credits) => credits,
                     None => {
                         return Err(ClientError::Protocol(
@@ -224,11 +317,12 @@ where
                 };
                 let credit_limited =
                     credit_limited_payload(supports_multi_credit, available_credits);
-                let chunk_len = (remaining - scheduled)
+                let chunk_len = (target - scheduled_bytes)
                     .min(options.chunk_size)
                     .min(max_read_size)
                     .min(credit_limited);
                 if chunk_len == 0 {
+                    stalled_for_credit = true;
                     break;
                 }
 
@@ -239,7 +333,7 @@ where
                 let message_id = self.connection.message_ids.allocate(credit_charge)?;
                 let request_offset =
                     offset
-                        .checked_add(u64::try_from(out.len() + scheduled).map_err(|_| {
+                        .checked_add(u64::try_from(scheduled_bytes).map_err(|_| {
                             ClientError::Protocol("READ offset conversion overflow")
                         })?)
                         .ok_or(ClientError::Protocol("READ offset overflow"))?;
@@ -262,95 +356,120 @@ where
                     .send_message(&request_message)
                     .await?;
 
-                pending.push(PendingRead {
+                let position = completed.len();
+                completed.push(None);
+                outstanding.insert(
                     message_id,
-                    chunk_len,
-                    async_state: AsyncReadState::default(),
-                });
-                scheduled += chunk_len;
+                    PendingRead {
+                        position,
+                        chunk_len,
+                        async_state: AsyncReadState::default(),
+                    },
+                )?;
+                scheduled_bytes += chunk_len;
+                stats.requests_sent += 1;
+                stats.peak_in_flight = stats.peak_in_flight.max(outstanding.len());
             }
 
-            if pending.is_empty() {
+            if stalled_for_credit && !outstanding.is_empty() {
+                stats.credit_stalls += 1;
+            }
+
+            if outstanding.is_empty() {
+                if let Some(status) = first_server_error {
+                    return Err(ClientError::ServerStatus(status));
+                }
+                if short_response_at.is_some() || scheduled_bytes >= target {
+                    break;
+                }
                 return Err(ClientError::Protocol(
-                    "SMB connection has no credits available for pipelined READ",
+                    "SMB connection exhausted credits with no outstanding READ able to restore them",
                 ));
             }
 
-            let mut completed = vec![None; pending.len()];
-            let mut short_response_at: Option<usize> = None;
-            let mut received = 0usize;
-
-            while received < pending.len() {
-                let mut response_message = self.connection.transport.receive_message().await?;
-                let header = Smb2Header::decode(&response_message)?;
-                let position = pending
-                    .iter()
-                    .position(|request| request.message_id == header.message_id)
-                    .ok_or(ClientError::Protocol(
-                        "pipelined READ response MessageId is not outstanding",
-                    ))?;
-                if completed[position].is_some() {
-                    return Err(ClientError::Protocol(
-                        "pipelined READ received a duplicate final response",
-                    ));
-                }
-
-                let request_message_id = pending[position].message_id;
-                let phase = pending[position].async_state.validate(
+            let mut response_message = self.connection.transport.receive_message().await?;
+            let header = Smb2Header::decode(&response_message)?;
+            let (position, chunk_len, phase) = {
+                let pending = outstanding.get_mut(header.message_id)?;
+                let phase = pending.async_state.validate(
                     file.tree_id(),
                     self.session_id,
-                    request_message_id,
+                    header.message_id,
                     &header,
                 )?;
-                self.connection.grant_credits(header.credits)?;
-                self.verify_read_response(&mut response_message, &header, phase)?;
-                if phase == ReadResponsePhase::InterimPending {
-                    continue;
-                }
+                (pending.position, pending.chunk_len, phase)
+            };
 
-                match header.status {
-                    StatusField::Status(0) => {
+            self.connection.grant_credits(header.credits)?;
+            self.verify_read_response(&mut response_message, &header, phase)?;
+            if phase == ReadResponsePhase::InterimPending {
+                continue;
+            }
+
+            let finished = outstanding.finish(header.message_id)?;
+            debug_assert_eq!(finished.position, position);
+            debug_assert_eq!(finished.chunk_len, chunk_len);
+
+            let data = match header.status {
+                StatusField::Status(0) => {
+                    if first_server_error.is_some() {
+                        Vec::new()
+                    } else {
                         let response = ReadResponse::decode_message(&response_message)?;
-                        if response.data.len() > pending[position].chunk_len {
+                        if response.data.len() > chunk_len {
                             return Err(ClientError::Protocol(
                                 "READ response returned more data than requested",
                             ));
                         }
-                        if response.data.len() < pending[position].chunk_len {
+                        if response.data.len() < chunk_len {
                             short_response_at = Some(
                                 short_response_at.map_or(position, |current| current.min(position)),
                             );
                         }
-                        completed[position] = Some(response.data);
+                        response.data
                     }
-                    StatusField::Status(STATUS_END_OF_FILE) => {
+                }
+                StatusField::Status(STATUS_END_OF_FILE) => {
+                    if first_server_error.is_none() {
                         short_response_at = Some(
                             short_response_at.map_or(position, |current| current.min(position)),
                         );
-                        completed[position] = Some(Vec::new());
                     }
-                    StatusField::Status(status) => return Err(ClientError::ServerStatus(status)),
-                    StatusField::ChannelSequence { .. } => {
-                        return Err(ClientError::Protocol(
-                            "READ response used request header form",
-                        ));
-                    }
+                    Vec::new()
                 }
-                received += 1;
-            }
+                StatusField::Status(status) => {
+                    if first_server_error.is_none() {
+                        first_server_error = Some(status);
+                    }
+                    Vec::new()
+                }
+                StatusField::ChannelSequence { .. } => {
+                    return Err(ClientError::Protocol(
+                        "READ response used request header form",
+                    ));
+                }
+            };
 
-            for (position, data) in completed.into_iter().enumerate() {
-                let data = data.ok_or(ClientError::Protocol(
-                    "pipelined READ did not receive every outstanding response",
-                ))?;
-                out.extend_from_slice(&data);
-                if short_response_at == Some(position) {
-                    return Ok(out);
-                }
+            if completed[position].replace(data).is_some() {
+                return Err(ClientError::Protocol(
+                    "pipelined READ completed the same output slot twice",
+                ));
             }
+            stats.responses_completed += 1;
         }
 
-        Ok(out)
+        let take_count = short_response_at
+            .map(|position| position.saturating_add(1))
+            .unwrap_or(completed.len());
+        let mut out = Vec::with_capacity(target);
+        for data in completed.into_iter().take(take_count) {
+            let data = data.ok_or(ClientError::Protocol(
+                "pipelined READ did not receive every required response",
+            ))?;
+            out.extend_from_slice(&data);
+        }
+
+        Ok(PipelinedReadResult { data: out, stats })
     }
 
     fn ensure_read_session(&self) -> Result<(), ClientError> {
@@ -441,6 +560,11 @@ fn read_credit_charge(supports_multi_credit: bool, length: usize) -> Result<u16,
     if !supports_multi_credit {
         return Ok(0);
     }
+    if length == 0 {
+        return Err(ClientError::Protocol(
+            "READ CreditCharge cannot be calculated for zero bytes",
+        ));
+    }
     let units = (length - 1) / CREDIT_UNIT_BYTES + 1;
     u16::try_from(units).map_err(|_| ClientError::Protocol("READ CreditCharge exceeds u16"))
 }
@@ -457,5 +581,48 @@ mod tests {
     #[test]
     fn legacy_read_uses_zero_credit_charge() {
         assert_eq!(read_credit_charge(false, 64 * 1024).unwrap(), 0);
+    }
+
+    #[test]
+    fn zero_credit_window_cannot_schedule_payload() {
+        assert_eq!(credit_limited_payload(true, 0), 0);
+        assert_eq!(credit_limited_payload(false, 0), 0);
+    }
+
+    #[test]
+    fn one_multi_credit_unit_limits_payload_to_64k() {
+        assert_eq!(credit_limited_payload(true, 1), 65_536);
+    }
+
+    #[test]
+    fn outstanding_table_rejects_duplicate_message_id() {
+        let mut outstanding = OutstandingReads::with_capacity(2);
+        let request = PendingRead {
+            position: 0,
+            chunk_len: 64 * 1024,
+            async_state: AsyncReadState::default(),
+        };
+        outstanding.insert(7, request).unwrap();
+        assert!(outstanding.insert(7, request).is_err());
+        assert_eq!(outstanding.len(), 1);
+    }
+
+    #[test]
+    fn finishing_outstanding_request_removes_message_id() {
+        let mut outstanding = OutstandingReads::with_capacity(1);
+        outstanding
+            .insert(
+                11,
+                PendingRead {
+                    position: 3,
+                    chunk_len: 128 * 1024,
+                    async_state: AsyncReadState::default(),
+                },
+            )
+            .unwrap();
+        let finished = outstanding.finish(11).unwrap();
+        assert_eq!(finished.position, 3);
+        assert!(outstanding.is_empty());
+        assert!(outstanding.finish(11).is_err());
     }
 }
