@@ -31,6 +31,19 @@ impl FileOpenOptions {
             credit_request: 16,
         }
     }
+
+    pub const fn read_existing_directory() -> Self {
+        Self {
+            requested_oplock_level: oplock_level::NONE,
+            impersonation_level: impersonation_level::IMPERSONATION,
+            desired_access: desired_access::GENERIC_READ,
+            file_attributes: 0,
+            share_access: share_access::READ | share_access::WRITE | share_access::DELETE,
+            create_disposition: create_disposition::OPEN,
+            create_options: create_options::DIRECTORY_FILE,
+            credit_request: 16,
+        }
+    }
 }
 
 impl Default for FileOpenOptions {
@@ -139,7 +152,8 @@ where
         options: FileOpenOptions,
         request_contexts: &[CreateContext],
     ) -> Result<FileOpenResult, ClientError> {
-        let path = normalize_relative_path(path.into())?;
+        let allow_empty_path = options.create_options & create_options::DIRECTORY_FILE != 0;
+        let path = normalize_relative_path(path.into(), allow_empty_path)?;
         if self.session_flags & smb_io_wire::session_flags::ENCRYPT_DATA != 0 {
             return Err(ClientError::Protocol(
                 "encrypted SMB sessions are not implemented yet",
@@ -265,9 +279,13 @@ fn set_credit_charge(message: &mut [u8], credit_charge: u16) {
     message[6..8].copy_from_slice(&credit_charge.to_le_bytes());
 }
 
-fn normalize_relative_path(path: String) -> Result<String, ClientError> {
+fn normalize_relative_path(path: String, allow_empty: bool) -> Result<String, ClientError> {
     if path.is_empty() {
-        return Err(ClientError::Protocol("file path must not be empty"));
+        return if allow_empty {
+            Ok(path)
+        } else {
+            Err(ClientError::Protocol("file path must not be empty"))
+        };
     }
     let normalized = path.replace('/', "\\");
     if normalized.starts_with('\\') {
@@ -288,13 +306,19 @@ mod tests {
     #[test]
     fn forward_slashes_are_normalized_for_smb() {
         assert_eq!(
-            normalize_relative_path("movies/sub/sample.mkv".to_string()).unwrap(),
+            normalize_relative_path("movies/sub/sample.mkv".to_string(), false).unwrap(),
             "movies\\sub\\sample.mkv"
         );
     }
 
     #[test]
+    fn empty_path_is_only_allowed_for_directory_open() {
+        assert!(normalize_relative_path(String::new(), false).is_err());
+        assert_eq!(normalize_relative_path(String::new(), true).unwrap(), "");
+    }
+
+    #[test]
     fn absolute_paths_are_rejected() {
-        assert!(normalize_relative_path("\\movies\\sample.mkv".to_string()).is_err());
+        assert!(normalize_relative_path("\\movies\\sample.mkv".to_string(), false).is_err());
     }
 }
