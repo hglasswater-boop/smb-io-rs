@@ -122,7 +122,13 @@ impl QueryDirectoryRequest {
             );
         }
         put_u32(&mut body, 28, self.output_buffer_length);
-        body.extend_from_slice(&file_name);
+        if file_name.is_empty() {
+            // StructureSize is 33 even without a search pattern. Keep the one-byte
+            // Buffer field on the wire while FileNameOffset/FileNameLength stay zero.
+            body.push(0);
+        } else {
+            body.extend_from_slice(&file_name);
+        }
         Ok(body)
     }
 
@@ -240,6 +246,21 @@ mod tests {
         );
         assert_eq!(get_u16(body, 26), 10);
         assert_eq!(get_u32(body, 28), 64 * 1024);
+    }
+
+    #[test]
+    fn request_without_search_pattern_keeps_one_byte_buffer() {
+        let request = QueryDirectoryRequest::new(
+            FileId::new(1, 2),
+            file_information_class::ID_FULL_DIRECTORY_INFORMATION,
+            "",
+            64 * 1024,
+        );
+        let body = request.encode_body().unwrap();
+        assert_eq!(body.len(), QUERY_DIRECTORY_REQUEST_STRUCTURE_SIZE as usize);
+        assert_eq!(get_u16(&body, 24), 0);
+        assert_eq!(get_u16(&body, 26), 0);
+        assert_eq!(body[QUERY_DIRECTORY_REQUEST_FIXED_SIZE], 0);
     }
 
     #[test]
