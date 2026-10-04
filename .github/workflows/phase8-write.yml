@@ -76,6 +76,7 @@ jobs:
             127.0.0.1 "$SMB_PORT" auth phase8.bin "$SMB_USER" "$SMB_PASSWORD" "$WRITE_SIZE" \
             2>&1 | tee /tmp/phase8-write.log
           grep -q '^write_create_verified: true$' /tmp/phase8-write.log
+          grep -q '^write_existing_verified: true$' /tmp/phase8-write.log
           grep -q '^write_large_verified: true$' /tmp/phase8-write.log
           grep -q '^write_positional_verified: true$' /tmp/phase8-write.log
           grep -q '^write_roundtrip_verified: true$' /tmp/phase8-write.log
