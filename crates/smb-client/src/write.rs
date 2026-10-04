@@ -140,11 +140,15 @@ where
             .connection
             .negotiated
             .as_ref()
-            .ok_or(ClientError::Protocol("WRITE requires negotiated parameters"))?;
+            .ok_or(ClientError::Protocol(
+                "WRITE requires negotiated parameters",
+            ))?;
         let max_write_size = usize::try_from(negotiated.max_write_size)
             .map_err(|_| ClientError::Protocol("MaxWriteSize does not fit in usize"))?;
         if max_write_size == 0 {
-            return Err(ClientError::Protocol("MaxWriteSize must be greater than zero"));
+            return Err(ClientError::Protocol(
+                "MaxWriteSize must be greater than zero",
+            ));
         }
         Ok((negotiated.supports_multi_credit(), max_write_size))
     }
