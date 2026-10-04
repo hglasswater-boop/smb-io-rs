@@ -67,11 +67,11 @@ Exit gate: QUERY_INFO and QUERY_DIRECTORY pass the permanent real-Samba Phase 6 
 
 Exit gate: the permanent Phase 7 workflow reads a 32 MiB Samba fixture with at least 128 READ requests, verifies content, and observes more than one in-flight request.
 
-### Phase 8: WRITE — in progress
+### Phase 8: WRITE — complete
 
 Issue: #21.
 
-Required scope:
+Implemented scope:
 
 - SMB2 WRITE request/response encode/decode;
 - FileId, offset, data-length, and channel-field validation;
@@ -79,24 +79,23 @@ Required scope:
 - correct CreditCharge for multi-credit writes;
 - partial/short-write handling;
 - synchronous and asynchronous (`STATUS_PENDING` + AsyncId) WRITE response correlation and validation;
-- create / overwrite / append open semantics needed by the filesystem layer;
-- preserve write-side NTSTATUS failures as structured `ClientError::ServerStatus` values;
+- create / overwrite / open-or-create writable random-access presets;
+- write-side NTSTATUS failures preserved as structured `ClientError::ServerStatus` values;
 - zero-length and boundary-condition tests;
-- real-Samba CREATE → WRITE → READ → CLOSE verification;
-- large-write integration coverage.
+- real-Samba CREATE → WRITE → CLOSE → reopen-existing → positional WRITE → CLOSE → READ verification;
+- 8 MiB large-write integration coverage under mandatory signing.
 
 Design constraints:
 
-- `write_at(offset, data)` is the native write primitive; do not introduce seek-based internal state;
-- do not silently retry mutations after ambiguous transport failure;
-- chunking must respect negotiated server limits and available credits rather than fixed application constants;
+- `write_at(offset, data)` is the native write primitive; no hidden seek-based internal state;
+- mutations are not silently replayed after ambiguous transport failure;
+- chunking respects negotiated server limits and available credits rather than fixed application constants;
 - async interim responses may grant credits and may be unsigned, while final responses must satisfy the session signing policy;
-- protocol packet handling remains in `smb-wire`, request execution/credits in `smb-client`, and filesystem semantics in `smb-fs` / `smb-stream` as applicable;
-- WRITE tests are added before the corresponding client/filesystem implementation.
+- protocol packet handling remains in `smb-wire`, request execution/credits in `smb-client`, and filesystem semantics in `smb-fs` / `smb-stream` as applicable.
 
-Exit gate: new files and existing files can be written at arbitrary offsets, large writes complete within credit and MaxWriteSize constraints, sync and async WRITE responses are handled safely, written bytes round-trip through READ, and the real-Samba write integration workflow is green.
+Exit gate: passed. Rust CI, Phase 8 WRITE Integration, Samba Integration, Phase 6 Query Integration, Phase 7 Parallel READ, Broker Reconnect, Durable Reconnect, and Android JNI all pass on the completion revision.
 
-### Phase 9: rename / delete / mkdir — pending
+### Phase 9: rename / delete / mkdir — next
 
 Issue: #22.
 
