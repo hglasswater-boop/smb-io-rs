@@ -9,7 +9,10 @@ fn write_existing_random_requests_positional_read_write_access() {
         desired_access::GENERIC_READ | desired_access::GENERIC_WRITE
     );
     assert_eq!(options.create_disposition, create_disposition::OPEN);
-    assert_ne!(options.create_options & create_options::NON_DIRECTORY_FILE, 0);
+    assert_ne!(
+        options.create_options & create_options::NON_DIRECTORY_FILE,
+        0
+    );
     assert_ne!(options.create_options & create_options::RANDOM_ACCESS, 0);
 }
 
@@ -20,10 +23,7 @@ fn create_or_truncate_random_uses_overwrite_if() {
         options.desired_access,
         desired_access::GENERIC_READ | desired_access::GENERIC_WRITE
     );
-    assert_eq!(
-        options.create_disposition,
-        create_disposition::OVERWRITE_IF
-    );
+    assert_eq!(options.create_disposition, create_disposition::OVERWRITE_IF);
 }
 
 #[test]
