@@ -80,7 +80,7 @@ Required scope:
 - partial/short-write handling;
 - synchronous and asynchronous (`STATUS_PENDING` + AsyncId) WRITE response correlation and validation;
 - create / overwrite / append open semantics needed by the filesystem layer;
-- typed mapping of write-side NTSTATUS failures;
+- preserve write-side NTSTATUS failures as structured `ClientError::ServerStatus` values;
 - zero-length and boundary-condition tests;
 - real-Samba CREATE → WRITE → READ → CLOSE verification;
 - large-write integration coverage.
