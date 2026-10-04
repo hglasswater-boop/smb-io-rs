@@ -1,7 +1,8 @@
-use smb_io_wire::{Command, Smb2Header};
+use smb_io_wire::{Command, HeaderId, Smb2Header, StatusField};
 
 use crate::ClientError;
 
+/// NTSTATUS returned by an interim response when the server continues a request asynchronously.
 pub const STATUS_PENDING: u32 = 0x0000_0103;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -11,11 +12,18 @@ pub(crate) enum ResponsePhase {
 }
 
 impl ResponsePhase {
-    pub(crate) fn requires_signature(self, _signing_required: bool) -> bool {
-        todo!("shared async response policy is implemented after the tests")
+    /// SMB2 async STATUS_PENDING is an interim response. Servers are permitted to leave that
+    /// response unsigned even when the session requires signing; final responses remain subject to
+    /// the normal signing requirement.
+    pub(crate) fn requires_signature(self, signing_required: bool) -> bool {
+        signing_required && self == Self::Final
     }
 }
 
+/// Per-request asynchronous state learned from SMB2_FLAGS_ASYNC_COMMAND responses.
+///
+/// The MessageId remains the primary correlation key. Once the server supplies a nonzero AsyncId,
+/// subsequent async responses for the request must carry the same identifier.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AsyncResponseState {
     async_id: Option<u64>,
@@ -28,13 +36,82 @@ impl AsyncResponseState {
 
     pub(crate) fn validate(
         &mut self,
-        _expected_command: Command,
-        _tree_id: u32,
-        _session_id: u64,
-        _message_id: u64,
-        _header: &Smb2Header,
+        expected_command: Command,
+        tree_id: u32,
+        session_id: u64,
+        message_id: u64,
+        header: &Smb2Header,
     ) -> Result<ResponsePhase, ClientError> {
-        todo!("shared async response validation is implemented after the tests")
+        if header.command != expected_command {
+            return Err(ClientError::Protocol(
+                "async response command does not match request",
+            ));
+        }
+        if header.message_id != message_id {
+            return Err(ClientError::Protocol(
+                "async response MessageId does not match request",
+            ));
+        }
+        if header.session_id != session_id {
+            return Err(ClientError::Protocol(
+                "async response SessionId does not match session",
+            ));
+        }
+
+        let status = match header.status {
+            StatusField::Status(status) => status,
+            StatusField::ChannelSequence { .. } => {
+                return Err(ClientError::Protocol(
+                    "async response used request header form",
+                ));
+            }
+        };
+
+        match header.id {
+            HeaderId::Sync {
+                tree_id: received_tree_id,
+                ..
+            } => {
+                if self.async_id.is_some() {
+                    return Err(ClientError::Protocol(
+                        "asynchronous final response reverted to sync header form",
+                    ));
+                }
+                if status == STATUS_PENDING {
+                    return Err(ClientError::Protocol(
+                        "STATUS_PENDING response did not use async header form",
+                    ));
+                }
+                if received_tree_id != tree_id {
+                    return Err(ClientError::Protocol(
+                        "response TreeId does not match request tree",
+                    ));
+                }
+                Ok(ResponsePhase::Final)
+            }
+            HeaderId::Async { async_id } => {
+                if async_id == 0 {
+                    return Err(ClientError::Protocol(
+                        "asynchronous response has a zero AsyncId",
+                    ));
+                }
+                if let Some(expected) = self.async_id {
+                    if expected != async_id {
+                        return Err(ClientError::Protocol(
+                            "asynchronous response AsyncId changed before completion",
+                        ));
+                    }
+                } else {
+                    self.async_id = Some(async_id);
+                }
+
+                if status == STATUS_PENDING {
+                    Ok(ResponsePhase::InterimPending)
+                } else {
+                    Ok(ResponsePhase::Final)
+                }
+            }
+        }
     }
 }
 
