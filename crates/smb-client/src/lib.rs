@@ -55,3 +55,4 @@ pub use signing::{SigningAlgorithm, SigningState};
 pub use smb_io_wire::Dialect;
 pub use transport::{TcpTransport, TcpTransportConfig, Transport};
 pub use tree::{TreeConnectOptions, TreeHandle};
+pub use write::WriteOptions;
