@@ -69,8 +69,8 @@ impl WriteRequest {
 
     pub fn encode_body(&self) -> Result<Vec<u8>, WireError> {
         self.validate()?;
-        let data_len = u32::try_from(self.data.len())
-            .map_err(|_| WireError::InvalidField("WRITE Length"))?;
+        let data_len =
+            u32::try_from(self.data.len()).map_err(|_| WireError::InvalidField("WRITE Length"))?;
         let mut body = vec![0u8; WRITE_REQUEST_FIXED_SIZE];
         put_u16(&mut body, 0, WRITE_REQUEST_STRUCTURE_SIZE);
         put_u16(&mut body, 2, WRITE_DEFAULT_DATA_OFFSET);
