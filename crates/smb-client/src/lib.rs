@@ -25,6 +25,7 @@ mod session;
 mod signing;
 mod transport;
 mod tree;
+mod write;
 
 pub use cancel::STATUS_CANCELLED;
 pub use cancellation::ReadCancellationToken;
