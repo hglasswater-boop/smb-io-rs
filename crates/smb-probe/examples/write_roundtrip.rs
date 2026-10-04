@@ -32,10 +32,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     getrandom::fill(&mut client_guid)?;
     getrandom::fill(&mut preauth_salt)?;
     connection
-        .negotiate(&NegotiateConfig::modern(
-            client_guid,
-            preauth_salt.to_vec(),
-        ))
+        .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
         .await?;
 
     let mut session = establish_session(connection, &username, &password).await?;
@@ -45,11 +42,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     let file = session
-        .open_file(
-            &tree,
-            &path,
-            FileOpenOptions::create_or_truncate_random(),
-        )
+        .open_file(&tree, &path, FileOpenOptions::create_or_truncate_random())
         .await?;
     let mut expected = make_pattern(size);
     let written = session.write_at(&file, 0, &expected).await?;
@@ -128,11 +121,7 @@ async fn establish_session(
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" {
-        String::new()
-    } else {
-        value
-    }
+    if value == "-" { String::new() } else { value }
 }
 
 fn usage() -> String {
