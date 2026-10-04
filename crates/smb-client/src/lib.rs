@@ -26,6 +26,7 @@ mod signing;
 mod transport;
 mod tree;
 mod write;
+mod write_open;
 
 pub use cancel::STATUS_CANCELLED;
 pub use cancellation::ReadCancellationToken;
