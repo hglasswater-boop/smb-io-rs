@@ -6,6 +6,7 @@
 //! SMB Credits, outstanding request dispatch, signing/security transforms, timeouts,
 //! cancellation, reconnect coordination, and protocol metrics.
 
+mod async_response;
 mod cancel;
 mod cancellation;
 mod close;
@@ -25,7 +26,10 @@ mod session;
 mod signing;
 mod transport;
 mod tree;
+mod write;
+mod write_open;
 
+pub use async_response::STATUS_PENDING;
 pub use cancel::STATUS_CANCELLED;
 pub use cancellation::ReadCancellationToken;
 pub use close::{CloseInfo, CloseOptions};
@@ -40,7 +44,6 @@ pub use query::{QueryDirectoryOptions, QueryInfoOptions, STATUS_NO_MORE_FILES};
 pub use read::{
     PipelinedReadOptions, PipelinedReadResult, PipelinedReadStats, ReadOptions, STATUS_END_OF_FILE,
 };
-pub use read_async::STATUS_PENDING;
 pub use reconnect::{
     ReadOnlyReconnectRecipe, ReconnectError, STATUS_NETWORK_NAME_DELETED,
     STATUS_NETWORK_SESSION_EXPIRED, STATUS_USER_SESSION_DELETED, connect_read_only_file,
@@ -54,3 +57,4 @@ pub use signing::{SigningAlgorithm, SigningState};
 pub use smb_io_wire::Dialect;
 pub use transport::{TcpTransport, TcpTransportConfig, Transport};
 pub use tree::{TreeConnectOptions, TreeHandle};
+pub use write::WriteOptions;

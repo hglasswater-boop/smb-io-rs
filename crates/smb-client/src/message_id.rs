@@ -20,11 +20,21 @@ impl MessageIdAllocator {
 
     pub fn allocate(&self, credit_charge: u16) -> Result<u64, ClientError> {
         let width = u64::from(credit_charge.max(1));
-        self.next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(width)
-            })
-            .map_err(|_| ClientError::Protocol("SMB MessageId space exhausted"))
+        let mut current = self.next.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(width)
+                .ok_or(ClientError::Protocol("SMB MessageId space exhausted"))?;
+            match self.next.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => return Ok(previous),
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn peek(&self) -> u64 {

@@ -1,120 +1,136 @@
 # smb-io-rs Roadmap
 
-## Phase 0: repository and protocol harness
+This roadmap is the repository documentation counterpart of GitHub Issue #28. Phase numbering and completion status must stay aligned with that tracker.
 
-- establish Cargo workspace boundaries;
-- define typed error model and metrics vocabulary;
-- build byte-level fixture/test harness;
-- add packet parser fuzz targets;
-- document interoperability test matrix.
+## Core implementation
 
-Exit gate: workspace/test harness builds cleanly and malformed packet input cannot panic basic header/frame parsing.
-
-## Phase 1: transport + SMB2 header + NEGOTIATE
+### Phase 1: TCP/445 + SMB2 header — complete
 
 - direct TCP transport on port 445;
-- frame reader/writer;
-- SMB2 header encode/decode;
-- MessageId allocation;
-- NEGOTIATE request/response for 2.0.2 through 3.1.1;
-- negotiated limits/capabilities model;
-- SMB 3.1.1 negotiate contexts and preauth state foundation.
+- NetBIOS-style SMB2 framing;
+- SMB2 header encode/decode and validation;
+- MessageId allocation foundation.
 
-Exit gate: negotiate successfully against representative Windows/Samba/NAS targets and record dialect/limits deterministically.
+Exit gate: protocol framing and SMB2 headers are validated by unit tests and can establish the initial transport path used by later phases.
 
-## Phase 2: authentication + session security
+### Phase 2: NEGOTIATE — complete
 
-- SPNEGO provider boundary;
-- NTLMv2;
-- anonymous session where permitted;
+- SMB 2.0.2 through SMB 3.1.1 negotiation;
+- negotiated limits and capabilities;
+- SMB 3.1.1 negotiate contexts and preauthentication-integrity foundation.
+
+Exit gate: negotiate succeeds against the supported Samba integration target and records dialect and limits deterministically.
+
+### Phase 3: SESSION_SETUP + SPNEGO / NTLMv2 — complete
+
+- SPNEGO + NTLMv2 authentication;
+- anonymous sessions where explicitly permitted;
 - SESSION_SETUP state machine;
-- signing key derivation;
-- SMB2/3 signing verification;
+- signing/session-key handling;
 - SMB 3.1.1 preauthentication integrity.
 
 Exit gate: authenticated signed sessions interoperate and invalid signatures fail closed.
 
-## Phase 3: share + read-only file path
+### Phase 4: TREE_CONNECT — complete
 
 - TREE_CONNECT / TREE_DISCONNECT;
+- share state and negotiated share capabilities.
+
+Exit gate: authenticated sessions can connect to the configured share and cleanly disconnect.
+
+### Phase 5: CREATE / READ / CLOSE — complete
+
 - CREATE / CLOSE;
-- QUERY_INFO;
-- QUERY_DIRECTORY;
-- READ;
-- high-level `stat`, `list`, `open`, `read_at`, `len`.
+- positional READ;
+- large-offset reads;
+- Android/JNI read path;
+- media broker, reconnecting read-only source, adaptive read-ahead, cancellation, and rolling cache.
 
-Exit gate: browse shares and random-read large files without SMBJ/libsmbclient.
+Exit gate: signed SMB reads, random access, media playback, and read-only reconnect scenarios pass the permanent integration gates.
 
-## Phase 4: request broker, credits, pipelined reads
+### Phase 6: QUERY_DIRECTORY / QUERY_INFO — complete
 
-- explicit SMB Credit accounting;
-- multi-credit request charge;
-- outstanding request table;
-- reader/writer task split;
-- multiple in-flight READ requests;
-- split/reassemble large positional reads;
-- priority classes and foreground credit reserve;
-- latency/throughput/credit metrics.
+- QUERY_INFO request/response and typed filesystem decoding;
+- paged QUERY_DIRECTORY enumeration;
+- share-root directory opens;
+- filesystem metadata and directory listing integration.
 
-Exit gate: sustained sequential read is no longer one-RTT-per-chunk and is benchmarked against baseline clients.
+Exit gate: QUERY_INFO and QUERY_DIRECTORY pass the permanent real-Samba Phase 6 integration workflow.
 
-## Phase 5: media stream engine
+### Phase 7: parallel READ / credit management — complete
 
-- adaptive chunk sizing;
-- range cache;
-- sequential access detection;
-- bounded read-ahead;
-- stream generations;
-- SMB2 CANCEL for eligible obsolete speculative reads;
-- memory budget and cache metrics.
+- credit-driven sliding READ window;
+- explicit outstanding request tracking by MessageId;
+- out-of-order and async STATUS_PENDING dispatch;
+- server-error draining;
+- pipelined READ metrics and credit-stall metrics.
 
-Exit gate: playback start and random seek benchmarks meet the XFiles migration targets without a duplicate Kotlin media cache.
+Exit gate: the permanent Phase 7 workflow reads a 32 MiB Samba fixture with at least 128 READ requests, verifies content, and observes more than one in-flight request.
 
-## Phase 6: mutations and write pipeline
+### Phase 8: WRITE — complete
 
-- WRITE;
-- FLUSH;
-- SET_INFO;
-- `write_at`, `set_len`, rename, delete, mkdir/create;
-- safe request retry classification;
-- independent-range write pipelining where semantics permit.
+Issue: #21.
 
-Exit gate: filesystem behavior required by the first consumer passes mutation/recovery tests with no blind replay after ambiguous failures.
+Implemented scope:
 
-## Phase 7: reconnect and resilience
+- SMB2 WRITE request/response encode/decode;
+- FileId, offset, data-length, and channel-field validation;
+- negotiated `MaxWriteSize` chunking;
+- correct CreditCharge for multi-credit writes;
+- partial/short-write handling;
+- synchronous and asynchronous (`STATUS_PENDING` + AsyncId) WRITE response correlation and validation;
+- create / overwrite / open-or-create writable random-access presets;
+- write-side NTSTATUS failures preserved as structured `ClientError::ServerStatus` values;
+- zero-length and boundary-condition tests;
+- real-Samba CREATE → WRITE → CLOSE → reopen-existing → positional WRITE → CLOSE → READ verification;
+- 8 MiB large-write integration coverage under mandatory signing.
 
-- connection generation state;
-- transport reconnect;
-- session/tree restoration;
-- file reopen/validation;
-- read/query recovery;
-- conservative mutation failure behavior;
-- architecture hooks for durable handles.
+Design constraints:
 
-Exit gate: expected mobile/network interruptions recover read-only workloads and never silently duplicate mutations.
+- `write_at(offset, data)` is the native write primitive; no hidden seek-based internal state;
+- mutations are not silently replayed after ambiguous transport failure;
+- chunking respects negotiated server limits and available credits rather than fixed application constants;
+- async interim responses may grant credits and may be unsigned, while final responses must satisfy the session signing policy;
+- protocol packet handling remains in `smb-wire`, request execution/credits in `smb-client`, and filesystem semantics in `smb-fs` / `smb-stream` as applicable.
 
-## Phase 8: Android bridge + XFiles A/B migration
+Exit gate: passed. Rust CI, Phase 8 WRITE Integration, Samba Integration, Phase 6 Query Integration, Phase 7 Parallel READ, Broker Reconnect, Durable Reconnect, and Android JNI all pass on the completion revision.
 
-- long-lived Rust runtime ownership;
-- opaque JNI handles;
-- stable DTO/error mapping;
-- efficient buffer transfer;
-- backend adapter in XFiles;
-- SMBJ vs Rust A/B benchmark path;
-- remove duplicate Kotlin media cache when Rust stream cache is active.
+### Phase 9: rename / delete / mkdir — next
 
-Replacement gate: XFiles functional parity for required SMB operations, security interoperability, lifecycle/reconnect tests, and no material regression in playback start, seek latency, sustained throughput, CPU, memory, or connection count.
+Issue: #22.
 
-## After first production replacement
+- directory CREATE for mkdir;
+- SET_INFO rename and disposition/delete operations;
+- replace-if-exists and delete-on-close semantics;
+- filesystem error mapping;
+- Unicode and integration coverage.
 
-Prioritize from concrete compatibility/performance demand:
+Exit gate: mkdir, rename, file delete, and empty-directory delete all round-trip through QUERY_DIRECTORY / QUERY_INFO against real Samba.
 
-- SMB3 encryption;
-- durable handles and replay semantics;
-- leases/oplocks;
-- Kerberos;
-- DFS;
-- multichannel;
-- QUIC;
-- compression;
-- additional platform bindings.
+### Phase 10: reconnect / durable handle — pending
+
+Issue: #23.
+
+- transport disconnect detection and connection-state transitions;
+- NEGOTIATE / SESSION_SETUP / TREE_CONNECT restoration;
+- Durable Handle V2 request/reconnect support;
+- logical-handle restoration and FileId update;
+- explicit outstanding-request and mutation replay policy;
+- reconnect stress coverage.
+
+Existing read-only reconnect support is useful groundwork but does not complete this phase; Phase 10 requires the full documented handle/reconnect contract, including write-side behavior.
+
+Exit gate: deliberate transport interruption can restore eligible handles and continue READ / WRITE / CLOSE safely, while ambiguous mutations are never silently duplicated.
+
+## Post phases
+
+These do not block the Phase 1–10 core roadmap unless a target environment makes them mandatory:
+
+- Kerberos authentication — Issue #24;
+- SMB3 encryption — Issue #25;
+- SMB3 multichannel — Issue #26;
+- SMB over QUIC — Issue #27.
+
+## XFiles integration
+
+XFiles is the first production consumer, not the protocol boundary. XFiles should only advance its pinned Rust engine revision after the corresponding smb-io-rs phase gates are green. SMBJ may remain as a temporary rollback path until required SMB file-management operations have Rust parity, but new Rust protocol functionality must not be designed around SMBJ APIs.
