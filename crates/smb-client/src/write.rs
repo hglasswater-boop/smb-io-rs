@@ -110,15 +110,7 @@ where
                 break (response_message, header);
             };
 
-            match header.status {
-                StatusField::Status(0) => {}
-                StatusField::Status(status) => return Err(ClientError::ServerStatus(status)),
-                StatusField::ChannelSequence { .. } => {
-                    return Err(ClientError::Protocol(
-                        "WRITE response used request header form",
-                    ));
-                }
-            }
+            validate_write_status(header.status)?;
 
             let response = WriteResponse::decode_message(&response_message)?;
             let count = usize::try_from(response.count)
@@ -210,6 +202,16 @@ where
     }
 }
 
+fn validate_write_status(status: StatusField) -> Result<(), ClientError> {
+    match status {
+        StatusField::Status(0) => Ok(()),
+        StatusField::Status(status) => Err(ClientError::ServerStatus(status)),
+        StatusField::ChannelSequence { .. } => Err(ClientError::Protocol(
+            "WRITE response used request header form",
+        )),
+    }
+}
+
 fn credit_limited_payload(supports_multi_credit: bool, available_credits: u32) -> usize {
     if supports_multi_credit {
         usize::try_from(available_credits)
@@ -239,6 +241,9 @@ fn write_credit_charge(supports_multi_credit: bool, length: usize) -> Result<u16
 mod tests {
     use super::*;
 
+    const STATUS_ACCESS_DENIED: u32 = 0xC000_0022;
+    const STATUS_DISK_FULL: u32 = 0xC000_007F;
+
     #[test]
     fn one_mib_write_costs_sixteen_credits() {
         assert_eq!(write_credit_charge(true, 1024 * 1024).unwrap(), 16);
@@ -260,5 +265,15 @@ mod tests {
         assert_eq!(credit_limited_payload(true, 1), CREDIT_UNIT_BYTES);
         assert_eq!(credit_limited_payload(true, 4), 4 * CREDIT_UNIT_BYTES);
         assert_eq!(credit_limited_payload(false, 1), CREDIT_UNIT_BYTES);
+    }
+
+    #[test]
+    fn write_server_status_is_preserved() {
+        for status in [STATUS_ACCESS_DENIED, STATUS_DISK_FULL] {
+            match validate_write_status(StatusField::Status(status)) {
+                Err(ClientError::ServerStatus(actual)) => assert_eq!(actual, status),
+                result => panic!("unexpected WRITE status result: {result:?}"),
+            }
+        }
     }
 }
