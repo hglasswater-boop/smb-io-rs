@@ -21,9 +21,9 @@ The engine owns SMB credits, request pipelining, MessageIds, signing, reconnect 
 
 The core roadmap is tracked in `docs/ROADMAP.md` and GitHub Issue #28.
 
-- Phases 1–7 are complete: TCP/445 and SMB2 framing, NEGOTIATE, SPNEGO/NTLMv2 SESSION_SETUP, TREE_CONNECT, CREATE/READ/CLOSE, QUERY_INFO/QUERY_DIRECTORY, and credit-driven parallel READ.
-- Phase 8 WRITE is in progress. The protocol packet layer and positional client WRITE path are being completed and validated against real Samba before it is considered finished.
-- Phase 9 file-management mutations and Phase 10 full reconnect/durable-handle completion remain pending.
+- Phases 1–8 are complete: TCP/445 and SMB2 framing, NEGOTIATE, SPNEGO/NTLMv2 SESSION_SETUP, TREE_CONNECT, CREATE/READ/CLOSE, QUERY_INFO/QUERY_DIRECTORY, credit-driven parallel READ, and positional WRITE with negotiated chunking/credits and real-Samba round-trip coverage.
+- Phase 9 file-management mutations (rename/delete/mkdir) are next.
+- Phase 10 full reconnect/durable-handle completion remains pending.
 
 Existing read-only reconnect and Durable Handle support are useful foundations for Phase 10, but they do not imply that mutation reconnect/replay semantics are complete.
 
