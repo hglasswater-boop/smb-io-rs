@@ -21,7 +21,7 @@ impl MessageIdAllocator {
     pub fn allocate(&self, credit_charge: u16) -> Result<u64, ClientError> {
         let width = u64::from(credit_charge.max(1));
         self.next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(width)
             })
             .map_err(|_| ClientError::Protocol("SMB MessageId space exhausted"))
