@@ -53,7 +53,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
+    session.close_file(file, CloseOptions::default()).await?;
 
+    let file = session
+        .open_file(&tree, &path, FileOpenOptions::write_existing_random())
+        .await?;
     let patch_written = session.write_at(&file, PATCH_OFFSET as u64, PATCH).await?;
     if patch_written != PATCH.len() {
         return Err(format!(
@@ -89,6 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("write_large_bytes: {size}");
     println!("write_positional_offset: {PATCH_OFFSET}");
     println!("write_create_verified: true");
+    println!("write_existing_verified: true");
     println!("write_large_verified: true");
     println!("write_positional_verified: true");
     println!("write_roundtrip_verified: true");
