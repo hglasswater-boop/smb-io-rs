@@ -1,7 +1,7 @@
 use smb_io_wire::{Command, Smb2Header};
 
-use crate::async_response::{AsyncResponseState, ResponsePhase};
 use crate::ClientError;
+use crate::async_response::{AsyncResponseState, ResponsePhase};
 
 pub(crate) type ReadResponsePhase = ResponsePhase;
 
