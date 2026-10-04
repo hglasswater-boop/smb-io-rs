@@ -1,7 +1,8 @@
 use smb_io_wire::{
-    Command, HeaderId, Smb2Header, StatusField, WriteRequest, WriteResponse, flags, session_flags,
+    Command, Smb2Header, StatusField, WriteRequest, WriteResponse, flags, session_flags,
 };
 
+use crate::async_response::{AsyncResponseState, ResponsePhase};
 use crate::{ClientError, FileHandle, SessionConnection, Transport};
 
 const CREDIT_UNIT_BYTES: usize = 65_536;
@@ -89,11 +90,25 @@ where
                 .transport
                 .send_message(&request_message)
                 .await?;
-            let mut response_message = self.connection.transport.receive_message().await?;
-            let header = Smb2Header::decode(&response_message)?;
-            self.validate_write_response_header(file, message_id, &header)?;
-            self.connection.grant_credits(header.credits)?;
-            self.verify_write_response(&mut response_message, &header)?;
+
+            let mut async_state = AsyncResponseState::default();
+            let (response_message, header) = loop {
+                let mut response_message = self.connection.transport.receive_message().await?;
+                let header = Smb2Header::decode(&response_message)?;
+                let phase = async_state.validate(
+                    Command::Write,
+                    file.tree_id(),
+                    self.session_id,
+                    message_id,
+                    &header,
+                )?;
+                self.connection.grant_credits(header.credits)?;
+                self.verify_write_response(&mut response_message, &header, phase)?;
+                if phase == ResponsePhase::InterimPending {
+                    continue;
+                }
+                break (response_message, header);
+            };
 
             match header.status {
                 StatusField::Status(0) => {}
@@ -175,49 +190,18 @@ where
         Ok(())
     }
 
-    fn validate_write_response_header(
-        &self,
-        file: &FileHandle,
-        message_id: u64,
-        header: &Smb2Header,
-    ) -> Result<(), ClientError> {
-        if header.command != Command::Write {
-            return Err(ClientError::Protocol(
-                "WRITE response command does not match request",
-            ));
-        }
-        if header.message_id != message_id {
-            return Err(ClientError::Protocol(
-                "WRITE response MessageId does not match request",
-            ));
-        }
-        if header.session_id != self.session_id {
-            return Err(ClientError::Protocol(
-                "WRITE response SessionId does not match session",
-            ));
-        }
-        match header.id {
-            HeaderId::Sync { tree_id, .. } if tree_id == file.tree_id() => Ok(()),
-            HeaderId::Sync { .. } => Err(ClientError::Protocol(
-                "WRITE response TreeId does not match file tree",
-            )),
-            HeaderId::Async { .. } => Err(ClientError::Protocol(
-                "WRITE response unexpectedly used async header form",
-            )),
-        }
-    }
-
     fn verify_write_response(
         &self,
         message: &mut [u8],
         header: &Smb2Header,
+        phase: ResponsePhase,
     ) -> Result<(), ClientError> {
         if header.flags & flags::SIGNED != 0 {
             let signing = self.signing.as_ref().ok_or(ClientError::Protocol(
                 "server signed WRITE without an available signing key",
             ))?;
             signing.verify(message)?;
-        } else if self.signing_required {
+        } else if phase.requires_signature(self.signing_required) {
             return Err(ClientError::Protocol(
                 "server omitted a required WRITE signature",
             ));
