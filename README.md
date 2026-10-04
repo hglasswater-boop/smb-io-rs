@@ -17,7 +17,17 @@ Sequential streams are adapters built on top of positional I/O, not the internal
 
 The engine owns SMB credits, request pipelining, MessageIds, signing, reconnect state, adaptive read-ahead, cancellation, and shared sessions so applications do not have to rebuild those concerns above the protocol layer.
 
-## Initial scope
+## Current implementation status
+
+The core roadmap is tracked in `docs/ROADMAP.md` and GitHub Issue #28.
+
+- Phases 1–7 are complete: TCP/445 and SMB2 framing, NEGOTIATE, SPNEGO/NTLMv2 SESSION_SETUP, TREE_CONNECT, CREATE/READ/CLOSE, QUERY_INFO/QUERY_DIRECTORY, and credit-driven parallel READ.
+- Phase 8 WRITE is in progress. The protocol packet layer and positional client WRITE path are being completed and validated against real Samba before it is considered finished.
+- Phase 9 file-management mutations and Phase 10 full reconnect/durable-handle completion remain pending.
+
+Existing read-only reconnect and Durable Handle support are useful foundations for Phase 10, but they do not imply that mutation reconnect/replay semantics are complete.
+
+## Target protocol scope
 
 - SMB 2.0.2 / 2.1 / 3.0 / 3.0.2 / 3.1.1
 - Direct TCP transport on port 445
@@ -28,6 +38,8 @@ The engine owns SMB credits, request pipelining, MessageIds, signing, reconnect 
 - Multiple in-flight READ/WRITE requests subject to negotiated limits and SMB credits
 - Adaptive read-ahead/cache for media workloads
 - Thin Android/JNI bridge as one consumer, not a core dependency
+
+Items in the target scope are not all implemented yet; `docs/ROADMAP.md` is authoritative for completion status.
 
 SMB1 is intentionally unsupported.
 
