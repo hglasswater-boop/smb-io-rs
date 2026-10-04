@@ -169,6 +169,25 @@ mod tests {
     }
 
     #[test]
+    fn direct_async_final_is_accepted_and_records_async_id() {
+        let mut state = AsyncResponseState::default();
+        let final_response = response(Command::Write, 0, HeaderId::Async { async_id: 77 });
+        assert_eq!(
+            state
+                .validate(
+                    Command::Write,
+                    TREE_ID,
+                    SESSION_ID,
+                    MESSAGE_ID,
+                    &final_response,
+                )
+                .unwrap(),
+            ResponsePhase::Final
+        );
+        assert_eq!(state.async_id(), Some(77));
+    }
+
+    #[test]
     fn read_sync_final_remains_supported() {
         let mut state = AsyncResponseState::default();
         let header = response(
@@ -231,6 +250,23 @@ mod tests {
     }
 
     #[test]
+    fn zero_async_id_is_rejected() {
+        let mut state = AsyncResponseState::default();
+        let final_response = response(Command::Write, 0, HeaderId::Async { async_id: 0 });
+        assert!(
+            state
+                .validate(
+                    Command::Write,
+                    TREE_ID,
+                    SESSION_ID,
+                    MESSAGE_ID,
+                    &final_response,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn pending_with_sync_header_is_rejected() {
         let mut state = AsyncResponseState::default();
         let pending = response(
@@ -244,6 +280,38 @@ mod tests {
         assert!(
             state
                 .validate(Command::Write, TREE_ID, SESSION_ID, MESSAGE_ID, &pending)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn async_final_cannot_revert_to_sync() {
+        let mut state = AsyncResponseState::default();
+        let pending = response(
+            Command::Write,
+            STATUS_PENDING,
+            HeaderId::Async { async_id: 11 },
+        );
+        state
+            .validate(Command::Write, TREE_ID, SESSION_ID, MESSAGE_ID, &pending)
+            .unwrap();
+        let final_response = response(
+            Command::Write,
+            0,
+            HeaderId::Sync {
+                process_id: 0,
+                tree_id: TREE_ID,
+            },
+        );
+        assert!(
+            state
+                .validate(
+                    Command::Write,
+                    TREE_ID,
+                    SESSION_ID,
+                    MESSAGE_ID,
+                    &final_response,
+                )
                 .is_err()
         );
     }
