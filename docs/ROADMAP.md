@@ -78,6 +78,7 @@ Required scope:
 - negotiated `MaxWriteSize` chunking;
 - correct CreditCharge for multi-credit writes;
 - partial/short-write handling;
+- synchronous and asynchronous (`STATUS_PENDING` + AsyncId) WRITE response correlation and validation;
 - create / overwrite / append open semantics needed by the filesystem layer;
 - typed mapping of write-side NTSTATUS failures;
 - zero-length and boundary-condition tests;
@@ -89,10 +90,11 @@ Design constraints:
 - `write_at(offset, data)` is the native write primitive; do not introduce seek-based internal state;
 - do not silently retry mutations after ambiguous transport failure;
 - chunking must respect negotiated server limits and available credits rather than fixed application constants;
+- async interim responses may grant credits and may be unsigned, while final responses must satisfy the session signing policy;
 - protocol packet handling remains in `smb-wire`, request execution/credits in `smb-client`, and filesystem semantics in `smb-fs` / `smb-stream` as applicable;
 - WRITE tests are added before the corresponding client/filesystem implementation.
 
-Exit gate: new files and existing files can be written at arbitrary offsets, large writes complete within credit and MaxWriteSize constraints, written bytes round-trip through READ, and the real-Samba write integration workflow is green.
+Exit gate: new files and existing files can be written at arbitrary offsets, large writes complete within credit and MaxWriteSize constraints, sync and async WRITE responses are handled safely, written bytes round-trip through READ, and the real-Samba write integration workflow is green.
 
 ### Phase 9: rename / delete / mkdir — pending
 
