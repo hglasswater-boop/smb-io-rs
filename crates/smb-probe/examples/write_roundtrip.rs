@@ -32,7 +32,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     getrandom::fill(&mut client_guid)?;
     getrandom::fill(&mut preauth_salt)?;
     connection
-        .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
+        .negotiate(&NegotiateConfig::modern(
+            client_guid,
+            preauth_salt.to_vec(),
+        ))
         .await?;
 
     let mut session = establish_session(connection, &username, &password).await?;
@@ -125,7 +128,11 @@ async fn establish_session(
 }
 
 fn dash_to_empty(value: String) -> String {
-    if value == "-" { String::new() } else { value }
+    if value == "-" {
+        String::new()
+    } else {
+        value
+    }
 }
 
 fn usage() -> String {
