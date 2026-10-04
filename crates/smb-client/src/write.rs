@@ -25,8 +25,8 @@ mod tests {
     }
 
     #[test]
-    fn zero_length_write_does_not_consume_a_credit_charge() {
-        assert_eq!(write_credit_charge(true, 0).unwrap(), 0);
+    fn zero_length_credit_calculation_is_rejected() {
+        assert!(write_credit_charge(true, 0).is_err());
     }
 
     #[test]
