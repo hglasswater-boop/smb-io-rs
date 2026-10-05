@@ -115,12 +115,8 @@ impl SetInfoRequest {
         credit_charge: u16,
         credit_request: u16,
     ) -> Result<Vec<u8>, WireError> {
-        let mut header = Smb2Header::request(
-            Command::SetInfo,
-            message_id,
-            credit_charge,
-            credit_request,
-        );
+        let mut header =
+            Smb2Header::request(Command::SetInfo, message_id, credit_charge, credit_request);
         header.session_id = session_id;
         header.id = HeaderId::Sync {
             process_id: 0,
@@ -272,7 +268,9 @@ fn encode_relative_utf16_name(name: &str) -> Result<Vec<u8>, WireError> {
         ));
     }
     if name.contains('\0') {
-        return Err(WireError::InvalidField("rename target must not contain NUL"));
+        return Err(WireError::InvalidField(
+            "rename target must not contain NUL",
+        ));
     }
     let mut out = Vec::with_capacity(name.encode_utf16().count() * 2);
     for unit in name.encode_utf16() {
