@@ -81,6 +81,7 @@ jobs:
           grep -q '^file_delete_verified: true$' /tmp/phase9.log
           grep -q '^nonempty_directory_guard_verified: true$' /tmp/phase9.log
           grep -q '^directory_delete_verified: true$' /tmp/phase9.log
+          grep -q '^query_info_verified: true$' /tmp/phase9.log
           grep -q '^phase9_verified: true$' /tmp/phase9.log
 
       - name: Show diagnostics on failure
