@@ -80,22 +80,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         true,
     )
     .await?;
-    require_name(
-        &mut session,
-        &tree,
-        &root,
-        "collision-source.txt",
-        false,
-    )
-    .await?;
-    require_name(
-        &mut session,
-        &tree,
-        &root,
-        "collision-target.txt",
-        true,
-    )
-    .await?;
+    require_name(&mut session, &tree, &root, "collision-source.txt", false).await?;
+    require_name(&mut session, &tree, &root, "collision-target.txt", true).await?;
     println!("replace_existing_verified: true");
 
     delete_file(&mut session, &tree, &renamed).await?;
