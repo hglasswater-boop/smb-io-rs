@@ -27,7 +27,10 @@ fn mutation_directory_open_requests_delete_access() {
     assert_ne!(options.desired_access & desired_access::DELETE, 0);
     assert_eq!(options.create_disposition, create_disposition::OPEN);
     assert_ne!(options.create_options & create_options::DIRECTORY_FILE, 0);
-    assert_eq!(options.create_options & create_options::NON_DIRECTORY_FILE, 0);
+    assert_eq!(
+        options.create_options & create_options::NON_DIRECTORY_FILE,
+        0
+    );
 }
 
 #[test]
@@ -35,6 +38,9 @@ fn mkdir_open_is_create_new_directory() {
     let options = FileOpenOptions::create_directory();
     assert_eq!(options.create_disposition, create_disposition::CREATE);
     assert_ne!(options.create_options & create_options::DIRECTORY_FILE, 0);
-    assert_eq!(options.create_options & create_options::NON_DIRECTORY_FILE, 0);
+    assert_eq!(
+        options.create_options & create_options::NON_DIRECTORY_FILE,
+        0
+    );
     assert_ne!(options.desired_access & desired_access::DELETE, 0);
 }
