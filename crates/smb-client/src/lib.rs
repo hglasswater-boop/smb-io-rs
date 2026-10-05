@@ -15,6 +15,7 @@ mod durable_open;
 mod error;
 mod file;
 mod message_id;
+mod mutation_open;
 mod negotiate;
 mod preauth;
 mod query;
