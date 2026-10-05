@@ -1,7 +1,7 @@
 use smb_io_wire::{
     Command, FileDispositionInformation, FileDispositionInformationEx, FileId,
-    FileRenameInformation, FileRenameInformationEx, SetInfoRequest, Smb2Header,
-    disposition_flags, info_type, rename_flags, set_info_class,
+    FileRenameInformation, FileRenameInformationEx, SetInfoRequest, Smb2Header, disposition_flags,
+    info_type, rename_flags, set_info_class,
 };
 
 #[test]
@@ -10,7 +10,11 @@ fn set_info_file_request_uses_protocol_layout() {
     let buffer = FileRenameInformation::new("folder\\新名.txt", true)
         .encode()
         .unwrap();
-    let request = SetInfoRequest::file(file_id, set_info_class::FILE_RENAME_INFORMATION, buffer.clone());
+    let request = SetInfoRequest::file(
+        file_id,
+        set_info_class::FILE_RENAME_INFORMATION,
+        buffer.clone(),
+    );
     let message = request.encode_message(7, 8, 9, 1, 16).unwrap();
 
     let header = Smb2Header::decode(&message).unwrap();
