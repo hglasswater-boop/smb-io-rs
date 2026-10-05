@@ -95,17 +95,34 @@ Design constraints:
 
 Exit gate: passed. Rust CI, Phase 8 WRITE Integration, Samba Integration, Phase 6 Query Integration, Phase 7 Parallel READ, Broker Reconnect, Durable Reconnect, and Android JNI all pass on the completion revision.
 
-### Phase 9: rename / delete / mkdir — next
+### Phase 9: rename / delete / mkdir — in progress
 
 Issue: #22.
 
-- directory CREATE for mkdir;
-- SET_INFO rename and disposition/delete operations;
-- replace-if-exists and delete-on-close semantics;
-- filesystem error mapping;
-- Unicode and integration coverage.
+Planned scope:
 
-Exit gate: mkdir, rename, file delete, and empty-directory delete all round-trip through QUERY_DIRECTORY / QUERY_INFO against real Samba.
+- directory CREATE for mkdir with `FILE_DIRECTORY_FILE` and create-new semantics;
+- SMB2 SET_INFO request/response encode/decode;
+- `FileRenameInformation` and `FileRenameInformationEx` buffer encoding;
+- `FileDispositionInformation` and `FileDispositionInformationEx` buffer encoding;
+- replace-if-exists support for rename;
+- delete-pending / delete-on-close semantics without blind mutation replay;
+- file delete and empty-directory delete;
+- structured propagation of path-conflict, sharing-violation, directory-not-empty, and access-denied NTSTATUS values;
+- Unicode rename/mkdir/delete coverage;
+- post-mutation verification using QUERY_DIRECTORY and QUERY_INFO.
+
+Design contract:
+
+- `smb-wire` owns SET_INFO packet representation plus FSCC information-buffer encoding only;
+- `smb-client` owns SET_INFO MessageId/credit/signing/response validation and exposes mutation-capable CREATE presets;
+- `smb-fs` owns `mkdir`, `rename`, and `delete` semantics and must not expose raw SMB access masks or information-class numbers;
+- rename/delete open the target with DELETE access and do not silently resend SET_INFO after an ambiguous transport failure;
+- SMB2 network rename uses share-root-relative UTF-16 paths with `RootDirectory = 0`;
+- the classic information classes remain the compatibility baseline; Ex encoders are implemented for protocol completeness and future POSIX/extended semantics without making them mandatory for the Phase 9 happy path;
+- successful mutation is not accepted solely from SET_INFO success: the integration gate verifies resulting namespace state with QUERY_DIRECTORY / QUERY_INFO.
+
+Exit gate: mkdir, rename, file delete, and empty-directory delete all round-trip through QUERY_DIRECTORY / QUERY_INFO against real Samba, including Unicode names and negative coverage for non-empty directory deletion and rename collision.
 
 ### Phase 10: reconnect / durable handle — pending
 
