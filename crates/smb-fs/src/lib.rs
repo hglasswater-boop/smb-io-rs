@@ -5,8 +5,10 @@
 //! Maps stable filesystem operations to SMB CREATE/QUERY/SET_INFO behavior
 //! without exposing SMB wire details to consumers.
 
+mod mutation;
 mod query;
 
+pub use mutation::{FsMutationError, delete_directory, delete_file, mkdir, rename};
 pub use query::{
     DirectoryNameEntry, FileStandardInformation, FsQueryError,
     decode_file_id_full_directory_information, decode_file_names_information,
