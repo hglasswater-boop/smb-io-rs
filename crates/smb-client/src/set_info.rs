@@ -175,10 +175,7 @@ fn validate_set_info_status(status: StatusField) -> Result<(), ClientError> {
     }
 }
 
-fn set_info_credit_charge(
-    supports_multi_credit: bool,
-    length: usize,
-) -> Result<u16, ClientError> {
+fn set_info_credit_charge(supports_multi_credit: bool, length: usize) -> Result<u16, ClientError> {
     if !supports_multi_credit {
         return Ok(0);
     }
