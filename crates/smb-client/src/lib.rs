@@ -24,6 +24,7 @@ mod read_async;
 mod reconnect;
 mod recovering_read;
 mod session;
+mod set_info;
 mod signing;
 mod transport;
 mod tree;
@@ -54,6 +55,7 @@ pub use recovering_read::{ReadReconnectPolicy, RecoveringReadOnlyFile};
 pub use session::{
     STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS, SessionConnection, SessionSetupConfig,
 };
+pub use set_info::SetInfoOptions;
 pub use signing::{SigningAlgorithm, SigningState};
 pub use smb_io_wire::Dialect;
 pub use transport::{TcpTransport, TcpTransportConfig, Transport};
