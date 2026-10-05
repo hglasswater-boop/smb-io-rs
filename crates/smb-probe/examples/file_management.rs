@@ -8,7 +8,8 @@ use smb_io_client::{
     SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions, TreeHandle,
 };
 use smb_io_fs::{
-    FsMutationError, delete_directory, delete_file, mkdir, read_directory_names, rename,
+    FsMutationError, delete_directory, delete_file, mkdir, query_standard_information,
+    read_directory_names, rename,
 };
 
 #[tokio::main]
@@ -44,6 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let root = format!("{base}-日本語");
     mkdir(&mut session, &tree, &root).await?;
     require_name(&mut session, &tree, "", &root, true).await?;
+    require_standard_info(&mut session, &tree, &root, true).await?;
     println!("mkdir_verified: true");
 
     let source = format!("{root}\\source.txt");
@@ -52,6 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     rename(&mut session, &tree, &source, &renamed, false).await?;
     require_name(&mut session, &tree, &root, "source.txt", false).await?;
     require_name(&mut session, &tree, &root, "改名済み.txt", true).await?;
+    require_standard_info(&mut session, &tree, &renamed, false).await?;
     println!("unicode_rename_verified: true");
 
     let collision_source = format!("{root}\\collision-source.txt");
@@ -82,6 +85,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await?;
     require_name(&mut session, &tree, &root, "collision-source.txt", false).await?;
     require_name(&mut session, &tree, &root, "collision-target.txt", true).await?;
+    require_standard_info(&mut session, &tree, &collision_target, false).await?;
     println!("replace_existing_verified: true");
 
     delete_file(&mut session, &tree, &renamed).await?;
@@ -104,6 +108,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     delete_directory(&mut session, &tree, &root).await?;
     require_name(&mut session, &tree, "", &root, false).await?;
     println!("directory_delete_verified: true");
+    println!("query_info_verified: true");
     println!("phase9_verified: true");
     Ok(())
 }
@@ -141,6 +146,30 @@ async fn require_name(
     if present != expected {
         return Err(format!(
             "directory verification mismatch: directory={directory:?} name={name:?} expected={expected}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn require_standard_info(
+    session: &mut SessionConnection<TcpTransport>,
+    tree: &TreeHandle,
+    path: &str,
+    directory: bool,
+) -> Result<(), Box<dyn Error>> {
+    let options = if directory {
+        FileOpenOptions::read_existing_directory()
+    } else {
+        FileOpenOptions::read_existing_random()
+    };
+    let file = session.open_file(tree, path, options).await?;
+    let info = query_standard_information(session, &file).await?;
+    session.close_file(file, CloseOptions::default()).await?;
+    if info.directory != directory {
+        return Err(format!(
+            "QUERY_INFO type mismatch: path={path:?} directory={} expected={directory}",
+            info.directory
         )
         .into());
     }
