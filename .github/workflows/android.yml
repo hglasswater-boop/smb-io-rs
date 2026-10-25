@@ -52,6 +52,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: smb-io-android-jni
           path: dist/jniLibs
           if-no-files-found: error
