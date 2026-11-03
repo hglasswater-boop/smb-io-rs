@@ -10,9 +10,10 @@ mod query;
 
 pub use mutation::{FsMutationError, delete_directory, delete_file, mkdir, rename};
 pub use query::{
-    DirectoryNameEntry, FileStandardInformation, FsQueryError,
-    decode_file_id_full_directory_information, decode_file_names_information,
-    query_standard_information, read_directory_names, read_directory_names_matching,
+    DirectoryMetadataEntry, DirectoryNameEntry, FileStandardInformation, FsQueryError,
+    decode_file_id_full_directory_information, decode_file_id_full_directory_metadata,
+    decode_file_names_information, query_standard_information, read_directory_metadata,
+    read_directory_metadata_matching, read_directory_names, read_directory_names_matching,
 };
 
 /// High-level file kind exposed by the filesystem layer.

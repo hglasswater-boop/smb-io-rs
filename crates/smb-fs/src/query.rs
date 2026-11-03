@@ -91,6 +91,18 @@ pub struct DirectoryNameEntry {
     pub name: String,
 }
 
+/// Full FileIdFullDirectoryInformation metadata. Timestamps are raw Windows FILETIME.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryMetadataEntry {
+    pub file_index: u32,
+    pub name: String,
+    pub creation_time: u64,
+    pub last_write_time: u64,
+    pub end_of_file: u64,
+    pub allocation_size: u64,
+    pub file_attributes: u32,
+}
+
 pub fn decode_file_names_information(
     buffer: &[u8],
 ) -> Result<Vec<DirectoryNameEntry>, FsQueryError> {
@@ -155,9 +167,22 @@ pub fn decode_file_names_information(
     Ok(entries)
 }
 
+/// Existing name-only interface, retained for Rust clients using Phase 6.
 pub fn decode_file_id_full_directory_information(
     buffer: &[u8],
 ) -> Result<Vec<DirectoryNameEntry>, FsQueryError> {
+    Ok(decode_file_id_full_directory_metadata(buffer)?
+        .into_iter()
+        .map(|entry| DirectoryNameEntry {
+            file_index: entry.file_index,
+            name: entry.name,
+        })
+        .collect())
+}
+
+pub fn decode_file_id_full_directory_metadata(
+    buffer: &[u8],
+) -> Result<Vec<DirectoryMetadataEntry>, FsQueryError> {
     let mut entries = Vec::new();
     let mut offset = 0usize;
 
@@ -172,6 +197,19 @@ pub fn decode_file_id_full_directory_information(
         let next_entry_offset =
             u32::from_le_bytes(remaining[0..4].try_into().expect("fixed range")) as usize;
         let file_index = u32::from_le_bytes(remaining[4..8].try_into().expect("fixed range"));
+        let creation_time = u64::from_le_bytes(remaining[8..16].try_into().expect("fixed range"));
+        let last_write_time =
+            u64::from_le_bytes(remaining[24..32].try_into().expect("fixed range"));
+        let end_of_file = i64::from_le_bytes(remaining[40..48].try_into().expect("fixed range"));
+        let allocation_size =
+            i64::from_le_bytes(remaining[48..56].try_into().expect("fixed range"));
+        if end_of_file < 0 || allocation_size < 0 {
+            return Err(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation has negative file size or allocation",
+            ));
+        }
+        let file_attributes =
+            u32::from_le_bytes(remaining[56..60].try_into().expect("fixed range"));
         let file_name_length = u32::from_le_bytes(
             remaining[FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET
                 ..FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET + 4]
@@ -202,7 +240,15 @@ pub fn decode_file_id_full_directory_information(
             units.push(u16::from_le_bytes([pair[0], pair[1]]));
         }
         let name = String::from_utf16(&units).map_err(|_| FsQueryError::InvalidUtf16)?;
-        entries.push(DirectoryNameEntry { file_index, name });
+        entries.push(DirectoryMetadataEntry {
+            file_index,
+            name,
+            creation_time,
+            last_write_time,
+            end_of_file: end_of_file as u64,
+            allocation_size: allocation_size as u64,
+            file_attributes,
+        });
 
         if next_entry_offset == 0 {
             break;
@@ -262,6 +308,37 @@ pub async fn read_directory_names_matching<T>(
 where
     T: Transport,
 {
+    Ok(
+        read_directory_metadata_matching(session, directory, pattern)
+            .await?
+            .into_iter()
+            .map(|entry| DirectoryNameEntry {
+                file_index: entry.file_index,
+                name: entry.name,
+            })
+            .collect(),
+    )
+}
+
+/// Paged, signed QUERY_DIRECTORY with size, timestamps, and attribute bits.
+pub async fn read_directory_metadata<T>(
+    session: &mut SessionConnection<T>,
+    directory: &FileHandle,
+) -> Result<Vec<DirectoryMetadataEntry>, FsQueryError>
+where
+    T: Transport,
+{
+    read_directory_metadata_matching(session, directory, "*").await
+}
+
+pub async fn read_directory_metadata_matching<T>(
+    session: &mut SessionConnection<T>,
+    directory: &FileHandle,
+    pattern: &str,
+) -> Result<Vec<DirectoryMetadataEntry>, FsQueryError>
+where
+    T: Transport,
+{
     if pattern.is_empty() {
         return Err(FsQueryError::InvalidData(
             "directory search pattern must not be empty",
@@ -270,8 +347,6 @@ where
 
     let mut entries = Vec::new();
     loop {
-        // Samba expects the search pattern to remain present on continuation requests.
-        // With RESTART_SCANS clear, the server still advances its directory cursor.
         let options = QueryDirectoryOptions::new(
             FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
             pattern,
@@ -281,7 +356,7 @@ where
         if buffer.is_empty() {
             break;
         }
-        entries.extend(decode_file_id_full_directory_information(&buffer)?);
+        entries.extend(decode_file_id_full_directory_metadata(&buffer)?);
     }
     Ok(entries)
 }
@@ -402,5 +477,76 @@ mod tests {
             .copy_from_slice(&name);
 
         assert!(decode_file_id_full_directory_information(&buffer).is_err());
+    }
+    #[test]
+    fn decodes_file_id_full_metadata_with_unicode_and_raw_filetime() {
+        let name: Vec<u8> = "日本語.mkv"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let creation = 133_000_000_000_000_000u64;
+        let modified = 133_001_000_000_000_000u64;
+        let mut data = vec![0u8; 80 + name.len()];
+        data[4..8].copy_from_slice(&17u32.to_le_bytes());
+        data[8..16].copy_from_slice(&creation.to_le_bytes());
+        data[24..32].copy_from_slice(&modified.to_le_bytes());
+        data[40..48].copy_from_slice(&1234i64.to_le_bytes());
+        data[48..56].copy_from_slice(&4096i64.to_le_bytes());
+        data[56..60].copy_from_slice(&0x22u32.to_le_bytes());
+        data[60..64].copy_from_slice(&(name.len() as u32).to_le_bytes());
+        data[80..].copy_from_slice(&name);
+
+        let entries = decode_file_id_full_directory_metadata(&data).unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.name, "日本語.mkv");
+        assert_eq!(entry.file_index, 17);
+        assert_eq!(entry.end_of_file, 1234);
+        assert_eq!(entry.allocation_size, 4096);
+        assert_eq!(entry.creation_time, creation);
+        assert_eq!(entry.last_write_time, modified);
+        assert_eq!(entry.file_attributes, 0x22);
+    }
+
+    #[test]
+    fn metadata_rejects_negative_file_size_and_allocation() {
+        let mut data = [0u8; 80];
+        data[40..48].copy_from_slice(&(-1i64).to_le_bytes());
+        assert!(decode_file_id_full_directory_metadata(&data).is_err());
+
+        data[40..48].copy_from_slice(&0i64.to_le_bytes());
+        data[48..56].copy_from_slice(&(-1i64).to_le_bytes());
+        assert!(decode_file_id_full_directory_metadata(&data).is_err());
+    }
+
+    #[test]
+    fn metadata_rejects_truncated_fixed_header() {
+        let data = [0u8; 79];
+        assert!(decode_file_id_full_directory_metadata(&data).is_err());
+    }
+
+    #[test]
+    fn metadata_decodes_multiple_entries_with_aligned_offsets() {
+        let first_name: Vec<u8> = "one".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let second_name: Vec<u8> = "二番目".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let first_len = (80 + first_name.len() + 7) & !7;
+        let mut data = vec![0u8; first_len + 80 + second_name.len()];
+        data[0..4].copy_from_slice(&(first_len as u32).to_le_bytes());
+        data[40..48].copy_from_slice(&42i64.to_le_bytes());
+        data[60..64].copy_from_slice(&(first_name.len() as u32).to_le_bytes());
+        data[80..80 + first_name.len()].copy_from_slice(&first_name);
+        data[first_len + 40..first_len + 48].copy_from_slice(&7i64.to_le_bytes());
+        data[first_len + 56..first_len + 60].copy_from_slice(&0x10u32.to_le_bytes());
+        data[first_len + 60..first_len + 64]
+            .copy_from_slice(&(second_name.len() as u32).to_le_bytes());
+        data[first_len + 80..].copy_from_slice(&second_name);
+
+        let entries = decode_file_id_full_directory_metadata(&data).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "one");
+        assert_eq!(entries[0].end_of_file, 42);
+        assert_eq!(entries[1].name, "二番目");
+        assert_eq!(entries[1].file_attributes, 0x10);
+        assert_eq!(entries[1].end_of_file, 7);
     }
 }
