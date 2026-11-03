@@ -975,8 +975,8 @@ mod tests {
         assert!(validate_open_request(&request).is_ok());
     }
     #[test]
-    fn mkdir_contract_requires_new_jni_generation() {
-        assert_eq!(crate::API_VERSION, 6);
+    fn legacy_mutation_contract_is_retained_in_jni_v7() {
+        assert_eq!(crate::API_VERSION, 7);
     }
 
     #[test]
