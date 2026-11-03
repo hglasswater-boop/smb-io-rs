@@ -37,3 +37,20 @@ impl FileOpenOptions {
         }
     }
 }
+
+#[cfg(test)]
+mod create_file_contract_tests {
+    use super::*;
+
+    #[test]
+    fn new_file_uses_create_not_overwrite_or_open_if() {
+        let new_file = FileOpenOptions::create_new_random();
+        assert_eq!(new_file.create_disposition, create_disposition::CREATE);
+        assert_ne!(new_file.create_disposition, create_disposition::OVERWRITE_IF);
+        assert_ne!(new_file.create_disposition, create_disposition::OPEN_IF);
+        assert_eq!(
+            new_file.create_options & create_options::NON_DIRECTORY_FILE,
+            create_options::NON_DIRECTORY_FILE
+        );
+    }
+}
