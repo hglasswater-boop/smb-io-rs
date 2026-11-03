@@ -74,6 +74,22 @@ mod create_file_contract_tests {
     }
 
     #[test]
+    fn random_access_existing_file_uses_open_without_truncation_or_creation() {
+        let options = FileOpenOptions::write_existing_random();
+        assert_eq!(options.create_disposition, create_disposition::OPEN);
+        assert_eq!(
+            options.desired_access,
+            desired_access::GENERIC_READ | desired_access::GENERIC_WRITE
+        );
+        assert_ne!(
+            options.create_options & create_options::NON_DIRECTORY_FILE,
+            0
+        );
+        assert_ne!(options.create_disposition, create_disposition::OVERWRITE_IF);
+        assert_ne!(options.create_disposition, create_disposition::OPEN_IF);
+    }
+
+    #[test]
     fn new_file_uses_create_not_overwrite_or_open_if() {
         let new_file = FileOpenOptions::create_new_random();
         assert_eq!(new_file.create_disposition, create_disposition::CREATE);
