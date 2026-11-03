@@ -1541,12 +1541,7 @@ mod tests {
             &AndroidEngine,
             SmbMutationRequest,
         ) -> Result<RandomHandle, AndroidBridgeError> = AndroidEngine::open_random;
-        let _read: fn(
-            &AndroidEngine,
-            RandomHandle,
-            u64,
-            usize,
-        ) -> Result<Vec<u8>, AndroidBridgeError> = AndroidEngine::read_random_at;
+        let _read = AndroidEngine::read_random_at;
         let _write: fn(
             &AndroidEngine,
             RandomHandle,
