@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
-    ClientError, CloseInfo, Connection, NegotiateConfig, ReadOnlyReconnectRecipe,
-    ReadReconnectPolicy, ReconnectError, SessionSetupConfig, TcpTransport, TcpTransportConfig,
-    TreeConnectOptions,
+    ClientError, CloseInfo, CloseOptions, Connection, FileOpenOptions, NegotiateConfig,
+    ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError, SessionConnection,
+    SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions, TreeHandle,
 };
-use smb_io_fs::FsMutationError;
+use smb_io_fs::{DirectoryMetadataEntry, FsMutationError, FsQueryError, read_directory_metadata};
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
     recovering_video_broker_with_policy,
@@ -86,6 +86,7 @@ pub enum AndroidBridgeError {
     Runtime(std::io::Error),
     Client(ClientError),
     Fs(FsMutationError),
+    Query(FsQueryError),
     Stream(StreamError),
     InvalidHandle(VideoHandle),
     InvalidConfig(&'static str),
@@ -100,6 +101,7 @@ impl fmt::Display for AndroidBridgeError {
             Self::Runtime(error) => write!(f, "Android SMB runtime error: {error}"),
             Self::Client(error) => write!(f, "SMB client error: {error}"),
             Self::Fs(error) => write!(f, "SMB filesystem error: {error}"),
+            Self::Query(error) => write!(f, "SMB directory query error: {error}"),
             Self::Stream(error) => write!(f, "SMB stream error: {error}"),
             Self::InvalidHandle(handle) => write!(f, "invalid SMB video handle {}", handle.raw()),
             Self::InvalidConfig(message) => {
@@ -123,6 +125,7 @@ impl Error for AndroidBridgeError {
             Self::Runtime(error) => Some(error),
             Self::Client(error) => Some(error),
             Self::Fs(error) => Some(error),
+            Self::Query(error) => Some(error),
             Self::Stream(error) => Some(error),
             Self::InvalidHandle(_)
             | Self::InvalidConfig(_)
@@ -142,6 +145,12 @@ impl From<ClientError> for AndroidBridgeError {
 impl From<FsMutationError> for AndroidBridgeError {
     fn from(value: FsMutationError) -> Self {
         Self::Fs(value)
+    }
+}
+
+impl From<FsQueryError> for AndroidBridgeError {
+    fn from(value: FsQueryError) -> Self {
+        Self::Query(value)
     }
 }
 
@@ -423,53 +432,7 @@ impl AndroidEngine {
         }
 
         self.runtime.block_on(async move {
-            let SmbMutationRequest {
-                host,
-                port,
-                share,
-                path,
-                username,
-                password,
-                domain,
-                workstation,
-            } = request;
-            let mut client_guid = [0u8; 16];
-            let mut preauth_salt = [0u8; 32];
-            getrandom::fill(&mut client_guid).map_err(|_| AndroidBridgeError::RandomSource)?;
-            getrandom::fill(&mut preauth_salt).map_err(|_| AndroidBridgeError::RandomSource)?;
-
-            let transport =
-                TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
-            let mut connection = Connection::new(transport);
-            connection
-                .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
-                .await?;
-
-            let mut session = if username.is_empty() {
-                let mut auth = AnonymousNtlmProvider::new();
-                connection
-                    .session_setup(&mut auth, SessionSetupConfig::default())
-                    .await?
-            } else {
-                let mut credentials = NtlmCredentials::new(username, password);
-                if !domain.is_empty() {
-                    credentials = credentials.with_domain(domain);
-                }
-                if !workstation.is_empty() {
-                    credentials = credentials.with_workstation(workstation);
-                }
-                let mut auth = NtlmV2Provider::new(credentials);
-                connection
-                    .session_setup(&mut auth, SessionSetupConfig::default())
-                    .await?
-            };
-
-            let tree = session
-                .tree_connect(
-                    format!(r"\\{}\{}", host, share),
-                    TreeConnectOptions::default(),
-                )
-                .await?;
+            let (mut session, tree, path) = connect_share(request).await?;
             match operation {
                 FileMutation::Mkdir => smb_io_fs::mkdir(&mut session, &tree, path).await?,
                 FileMutation::Rename { destination } => {
@@ -480,6 +443,22 @@ impl AndroidEngine {
                 }
             }
             Ok(())
+        })
+    }
+
+    /// Read-only metadata enumeration. Returns complete, bounded XFL1 payload or an error.
+    pub fn list_directory(&self, request: SmbMutationRequest) -> Result<Vec<u8>, AndroidBridgeError> {
+        validate_directory_request(&request)?;
+        self.runtime.block_on(async move {
+            let (mut session, tree, path) = connect_share(request).await?;
+            let dir = session
+                .open_file(&tree, &path, FileOpenOptions::read_existing_directory())
+                .await?;
+            let entries = read_directory_metadata(&mut session, &dir).await;
+            let closed = session.close_file(dir, CloseOptions::default()).await;
+            let entries = entries?;
+            closed?;
+            encode_directory_metadata(&entries)
         })
     }
 
@@ -509,6 +488,104 @@ fn map_broker_error(error: BrokerError) -> AndroidBridgeError {
 
 fn cancelled_bridge_error() -> AndroidBridgeError {
     AndroidBridgeError::Stream(StreamError::Client(ClientError::Cancelled))
+}
+
+const MAX_DIRECTORY_RESULT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Build one complete, versioned little-endian payload or fail; never return truncated entries.
+fn encode_directory_metadata(
+    entries: &[DirectoryMetadataEntry],
+) -> Result<Vec<u8>, AndroidBridgeError> {
+    let count = u32::try_from(entries.len())
+        .map_err(|_| AndroidBridgeError::InvalidConfig("directory entry count exceeds u32"))?;
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(b"XFL1");
+    bytes.extend_from_slice(&count.to_le_bytes());
+    for entry in entries {
+        let name = entry.name.as_bytes();
+        let name_length = u32::try_from(name.len())
+            .map_err(|_| AndroidBridgeError::InvalidConfig("directory name too long"))?;
+        let required = 4usize
+            .checked_add(name.len())
+            .and_then(|size| size.checked_add(28))
+            .and_then(|size| size.checked_add(bytes.len()))
+            .ok_or(AndroidBridgeError::InvalidConfig("directory listing length overflow"))?;
+        if required > MAX_DIRECTORY_RESULT_BYTES {
+            return Err(AndroidBridgeError::InvalidConfig(
+                "directory listing exceeds maximum JNI payload",
+            ));
+        }
+        bytes.extend_from_slice(&name_length.to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(&entry.file_attributes.to_le_bytes());
+        bytes.extend_from_slice(&entry.end_of_file.to_le_bytes());
+        bytes.extend_from_slice(&entry.creation_time.to_le_bytes());
+        bytes.extend_from_slice(&entry.last_write_time.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+/// A read-only query may address the share root with an empty path.
+fn validate_directory_request(request: &SmbMutationRequest) -> Result<(), AndroidBridgeError> {
+    if request.path.is_empty() {
+        let mut root = SmbMutationRequest::new(&request.host, &request.share, "root", "", "");
+        root.port = request.port;
+        return validate_mutation_request(&root);
+    }
+    validate_mutation_request(request)
+}
+
+/// Shared signed/authenticated SMB session for the one-shot mutations and directory queries.
+async fn connect_share(
+    request: SmbMutationRequest,
+) -> Result<(SessionConnection<TcpTransport>, TreeHandle, String), AndroidBridgeError> {
+    let SmbMutationRequest {
+        host,
+        port,
+        share,
+        path,
+        username,
+        password,
+        domain,
+        workstation,
+    } = request;
+    let mut client_guid = [0u8; 16];
+    let mut preauth_salt = [0u8; 32];
+    getrandom::fill(&mut client_guid).map_err(|_| AndroidBridgeError::RandomSource)?;
+    getrandom::fill(&mut preauth_salt).map_err(|_| AndroidBridgeError::RandomSource)?;
+
+    let transport = TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
+    let mut connection = Connection::new(transport);
+    connection
+        .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
+        .await?;
+
+    let mut session = if username.is_empty() {
+        let mut auth = AnonymousNtlmProvider::new();
+        connection
+            .session_setup(&mut auth, SessionSetupConfig::default())
+            .await?
+    } else {
+        let mut credentials = NtlmCredentials::new(username, password);
+        if !domain.is_empty() {
+            credentials = credentials.with_domain(domain);
+        }
+        if !workstation.is_empty() {
+            credentials = credentials.with_workstation(workstation);
+        }
+        let mut auth = NtlmV2Provider::new(credentials);
+        connection
+            .session_setup(&mut auth, SessionSetupConfig::default())
+            .await?
+    };
+
+    let tree = session
+        .tree_connect(
+            format!(r"\\{}\{}", host, share),
+            TreeConnectOptions::default(),
+        )
+        .await?;
+    Ok((session, tree, path))
 }
 
 fn validate_mutation_request(request: &SmbMutationRequest) -> Result<(), AndroidBridgeError> {
