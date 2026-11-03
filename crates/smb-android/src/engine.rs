@@ -1252,6 +1252,80 @@ mod tests {
     }
 
     #[test]
+    fn random_access_handle_has_a_disjoint_tag_and_cannot_cross_call() {
+        let valid = RandomHandle::from_raw(RANDOM_HANDLE_FLAG | 1);
+        assert_eq!(valid.table_key().unwrap().raw(), 1);
+        assert!(RandomHandle::from_raw(1).table_key().is_err());
+        assert!(RandomHandle::from_raw(WRITABLE_HANDLE_FLAG | 1)
+            .table_key()
+            .is_err());
+        assert!(RandomHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1)
+            .table_key()
+            .is_err());
+        assert!(WritableHandle::from_raw(valid.raw()).table_key().is_err());
+        assert!(DirectoryHandle::from_raw(valid.raw()).table_key().is_err());
+    }
+
+    #[test]
+    fn random_access_open_rejects_invalid_paths_before_transport() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in ["", "../escape", "/absolute", "./dot", "nul\0name"] {
+            let request = SmbMutationRequest::new("no-such-host.invalid", "share", path, "", "");
+            assert!(
+                matches!(
+                    engine.open_random(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "accepted unsafe random-access path: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn random_access_calls_are_bounded_and_invalid_handles_reject() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        let invalid = RandomHandle::from_raw(RANDOM_HANDLE_FLAG | 999);
+        assert!(matches!(
+            engine.read_random_at(invalid, 0, MAX_JNI_WRITE_BYTES + 1),
+            Err(AndroidBridgeError::ReadTooLarge { .. })
+        ));
+        assert!(matches!(
+            engine.write_random_at(invalid, 0, &vec![1; MAX_JNI_WRITE_BYTES + 1]),
+            Err(AndroidBridgeError::WriteTooLarge { .. })
+        ));
+        assert!(engine.flush_random(invalid).is_err());
+        assert!(engine.set_random_length(invalid, 0).is_err());
+        assert!(engine.close_random(invalid).is_err());
+        assert_eq!(crate::API_VERSION, 8);
+    }
+
+    #[test]
+    fn random_access_native_method_types_are_stable() {
+        let _open: fn(
+            &AndroidEngine,
+            SmbMutationRequest,
+        ) -> Result<RandomHandle, AndroidBridgeError> = AndroidEngine::open_random;
+        let _read: fn(
+            &AndroidEngine,
+            RandomHandle,
+            u64,
+            usize,
+        ) -> Result<Vec<u8>, AndroidBridgeError> = AndroidEngine::read_random_at;
+        let _write: fn(
+            &AndroidEngine,
+            RandomHandle,
+            u64,
+            &[u8],
+        ) -> Result<usize, AndroidBridgeError> = AndroidEngine::write_random_at;
+        let _set_length: fn(&AndroidEngine, RandomHandle, u64) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::set_random_length;
+        let _flush: fn(&AndroidEngine, RandomHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::flush_random;
+        let _close: fn(&AndroidEngine, RandomHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::close_random;
+    }
+
+    #[test]
     fn directory_binary_contract_rejects_oversized_single_page() {
         let entry = smb_io_fs::DirectoryMetadataEntry {
             file_index: 0,
