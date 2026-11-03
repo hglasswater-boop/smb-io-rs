@@ -8,12 +8,13 @@ use std::time::Duration;
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
     ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig,
-    QueryDirectoryOptions, QueryInfoOptions, ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError,
-    SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
-    TreeHandle,
+    QueryDirectoryOptions, QueryInfoOptions, ReadOnlyReconnectRecipe, ReadReconnectPolicy,
+    ReconnectError, SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig,
+    TreeConnectOptions, TreeHandle,
 };
 use smb_io_fs::{
-    DirectoryMetadataEntry, FileFsFullSizeInformation, FsMutationError, FsQueryError, decode_file_id_full_directory_metadata,
+    DirectoryMetadataEntry, FileFsFullSizeInformation, FsMutationError, FsQueryError,
+    decode_file_id_full_directory_metadata,
 };
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
@@ -647,11 +648,12 @@ impl AndroidEngine {
     ) -> Result<Vec<u8>, AndroidBridgeError> {
         let entry = self.directories.get(handle.table_key()?)?;
         let mut state = lock(&entry)?;
-        let DirectorySession { session, directory, .. } = &mut *state;
-        let raw = self.runtime.block_on(session.query_info(
-            directory,
-            QueryInfoOptions::filesystem(0x07, 32),
-        ))?;
+        let DirectorySession {
+            session, directory, ..
+        } = &mut *state;
+        let raw = self
+            .runtime
+            .block_on(session.query_info(directory, QueryInfoOptions::filesystem(0x07, 32)))?;
         let info = FileFsFullSizeInformation::decode(&raw)?;
         let (total, caller_free) = info.capacity_bytes();
         Ok(encode_capacity_bytes(total, caller_free))
@@ -662,7 +664,12 @@ impl AndroidEngine {
     pub fn directory_size(&self, handle: DirectoryHandle) -> Result<i64, AndroidBridgeError> {
         let entry = self.directories.get(handle.table_key()?)?;
         let mut state = lock(&entry)?;
-        let DirectorySession { session, tree, root_path, .. } = &mut *state;
+        let DirectorySession {
+            session,
+            tree,
+            root_path,
+            ..
+        } = &mut *state;
         self.runtime.block_on(async {
             let mut pending = vec![root_path.clone()];
             let mut total = 0u64;
@@ -672,20 +679,25 @@ impl AndroidEngine {
                     .await?;
                 let result = async {
                     loop {
-                        let bytes = session.query_directory(
-                            &directory,
-                            QueryDirectoryOptions::new(
-                                FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
-                                "*",
-                                DIRECTORY_QUERY_BUFFER_BYTES,
-                            ),
-                        ).await?;
-                        if bytes.is_empty() { break; }
+                        let bytes = session
+                            .query_directory(
+                                &directory,
+                                QueryDirectoryOptions::new(
+                                    FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
+                                    "*",
+                                    DIRECTORY_QUERY_BUFFER_BYTES,
+                                ),
+                            )
+                            .await?;
+                        if bytes.is_empty() {
+                            break;
+                        }
                         let entries = decode_file_id_full_directory_metadata(&bytes)?;
                         accumulate_directory_entries(&entries, &path, &mut pending, &mut total);
                     }
                     Ok::<(), AndroidBridgeError>(())
-                }.await;
+                }
+                .await;
                 let closed = session.close_file(directory, CloseOptions::default()).await;
                 result?;
                 closed?;
@@ -1030,9 +1042,13 @@ fn accumulate_directory_entries(
     total: &mut u64,
 ) {
     for entry in entries {
-        if entry.name.is_empty() || entry.name == "." || entry.name == ".." ||
-            entry.name.contains('/') || entry.name.contains('\\') ||
-            entry.name.contains('\0') {
+        if entry.name.is_empty()
+            || entry.name == "."
+            || entry.name == ".."
+            || entry.name.contains('/')
+            || entry.name.contains('\\')
+            || entry.name.contains('\0')
+        {
             continue;
         }
         if entry.file_attributes & 0x10 != 0 {
@@ -1670,20 +1686,40 @@ mod tests {
     fn directory_size_skips_junctions_and_counts_only_file_eof() {
         let entries = vec![
             DirectoryMetadataEntry {
-                name: ".".into(), file_attributes: 0x10, end_of_file: 0,
-                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+                name: ".".into(),
+                file_attributes: 0x10,
+                end_of_file: 0,
+                file_index: 0,
+                allocation_size: 0,
+                creation_time: 0,
+                last_write_time: 0,
             },
             DirectoryMetadataEntry {
-                name: "folder".into(), file_attributes: 0x10, end_of_file: 0,
-                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+                name: "folder".into(),
+                file_attributes: 0x10,
+                end_of_file: 0,
+                file_index: 0,
+                allocation_size: 0,
+                creation_time: 0,
+                last_write_time: 0,
             },
             DirectoryMetadataEntry {
-                name: "junction".into(), file_attributes: 0x410, end_of_file: 0,
-                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+                name: "junction".into(),
+                file_attributes: 0x410,
+                end_of_file: 0,
+                file_index: 0,
+                allocation_size: 0,
+                creation_time: 0,
+                last_write_time: 0,
             },
             DirectoryMetadataEntry {
-                name: "movie.mkv".into(), file_attributes: 0, end_of_file: 22,
-                file_index: 0, allocation_size: 4_096, creation_time: 0, last_write_time: 0,
+                name: "movie.mkv".into(),
+                file_attributes: 0,
+                end_of_file: 22,
+                file_index: 0,
+                allocation_size: 4_096,
+                creation_time: 0,
+                last_write_time: 0,
             },
         ];
         let mut pending = Vec::new();
@@ -1697,12 +1733,22 @@ mod tests {
     fn directory_size_saturates_signed_java_long_and_prevents_traversal() {
         let entries = vec![
             DirectoryMetadataEntry {
-                name: "../outside".into(), file_attributes: 0x10, end_of_file: 0,
-                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+                name: "../outside".into(),
+                file_attributes: 0x10,
+                end_of_file: 0,
+                file_index: 0,
+                allocation_size: 0,
+                creation_time: 0,
+                last_write_time: 0,
             },
             DirectoryMetadataEntry {
-                name: "large.mkv".into(), file_attributes: 0, end_of_file: u64::MAX,
-                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+                name: "large.mkv".into(),
+                file_attributes: 0,
+                end_of_file: u64::MAX,
+                file_index: 0,
+                allocation_size: 0,
+                creation_time: 0,
+                last_write_time: 0,
             },
         ];
         let mut pending = Vec::new();
@@ -1721,5 +1767,4 @@ mod tests {
         assert_eq!(&bytes[12..20], &1024i64.to_le_bytes());
         assert_eq!(crate::API_VERSION, 9);
     }
-
 }
