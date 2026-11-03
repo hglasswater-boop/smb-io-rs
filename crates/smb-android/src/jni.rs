@@ -15,8 +15,7 @@ use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
 use crate::{
     API_VERSION, AndroidEngine, AndroidEngineConfig, DirectoryHandle, SmbMutationRequest,
-    VideoHandle,
-    VideoOpenRequest,
+    VideoHandle, VideoOpenRequest,
 };
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
