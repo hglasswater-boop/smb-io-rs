@@ -14,8 +14,8 @@ use jni::sys::{jbyte, jint, jlong};
 use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
 use crate::{
-    API_VERSION, AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoHandle,
-    VideoOpenRequest,
+    API_VERSION, AndroidEngine, AndroidEngineConfig, DirectoryHandle, SmbMutationRequest,
+    VideoHandle, VideoOpenRequest,
 };
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
@@ -158,6 +158,97 @@ pub fn native_open_video<'local>(
                     Ok(raw) => Ok(raw),
                     Err(_) => throw_io(env, "SMB native handle space exceeded Java Long range"),
                 },
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Open a directory cursor. Kotlin must close this handle in finally.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_open_directory<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    path: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) -> jlong {
+    unowned_env
+        .with_env(|env| -> JniResult<jlong> {
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(0);
+            };
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.open_directory(request) {
+                Ok(handle) => Ok(handle.raw() as jlong),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Return one signed SMB QUERY_DIRECTORY page; an XFL1 count=0 means EOF.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_read_directory_page<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) -> JByteArray<'local> {
+    unowned_env
+        .with_env(|env| -> JniResult<JByteArray<'local>> {
+            if handle <= 0 {
+                return throw_argument(env, "directory handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.read_directory_page(DirectoryHandle::from_raw(handle as u64)) {
+                Ok(data) => env.byte_array_from_slice(&data),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Close the SMB handle even after a page read fails.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_close_directory<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            if handle <= 0 {
+                return throw_argument(env, "directory handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.close_directory(DirectoryHandle::from_raw(handle as u64)) {
+                Ok(()) => Ok(()),
                 Err(error) => throw_io(env, error),
             }
         })

@@ -7,11 +7,14 @@ use std::time::Duration;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
-    ClientError, CloseInfo, Connection, NegotiateConfig, ReadOnlyReconnectRecipe,
-    ReadReconnectPolicy, ReconnectError, SessionSetupConfig, TcpTransport, TcpTransportConfig,
-    TreeConnectOptions,
+    ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig,
+    QueryDirectoryOptions, ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError,
+    SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
+    TreeHandle,
 };
-use smb_io_fs::FsMutationError;
+use smb_io_fs::{
+    DirectoryMetadataEntry, FsMutationError, FsQueryError, decode_file_id_full_directory_metadata,
+};
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
     recovering_video_broker_with_policy,
@@ -86,6 +89,7 @@ pub enum AndroidBridgeError {
     Runtime(std::io::Error),
     Client(ClientError),
     Fs(FsMutationError),
+    Query(FsQueryError),
     Stream(StreamError),
     InvalidHandle(VideoHandle),
     InvalidConfig(&'static str),
@@ -100,6 +104,7 @@ impl fmt::Display for AndroidBridgeError {
             Self::Runtime(error) => write!(f, "Android SMB runtime error: {error}"),
             Self::Client(error) => write!(f, "SMB client error: {error}"),
             Self::Fs(error) => write!(f, "SMB filesystem error: {error}"),
+            Self::Query(error) => write!(f, "SMB directory query error: {error}"),
             Self::Stream(error) => write!(f, "SMB stream error: {error}"),
             Self::InvalidHandle(handle) => write!(f, "invalid SMB video handle {}", handle.raw()),
             Self::InvalidConfig(message) => {
@@ -123,6 +128,7 @@ impl Error for AndroidBridgeError {
             Self::Runtime(error) => Some(error),
             Self::Client(error) => Some(error),
             Self::Fs(error) => Some(error),
+            Self::Query(error) => Some(error),
             Self::Stream(error) => Some(error),
             Self::InvalidHandle(_)
             | Self::InvalidConfig(_)
@@ -142,6 +148,12 @@ impl From<ClientError> for AndroidBridgeError {
 impl From<FsMutationError> for AndroidBridgeError {
     fn from(value: FsMutationError) -> Self {
         Self::Fs(value)
+    }
+}
+
+impl From<FsQueryError> for AndroidBridgeError {
+    fn from(value: FsQueryError) -> Self {
+        Self::Query(value)
     }
 }
 
@@ -257,6 +269,40 @@ enum FileMutation {
 struct VideoSession {
     broker: VideoBrokerHandle,
 }
+/// Independent JNI handle type. The high bit below the sign bit keeps these handles distinct
+/// from the low-range video handles, while retaining positive Java Long values.
+const DIRECTORY_HANDLE_FLAG: u64 = 1u64 << 62;
+const FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS: u8 = 0x26;
+const DIRECTORY_QUERY_BUFFER_BYTES: u32 = 65_535;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryHandle(u64);
+
+impl DirectoryHandle {
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    fn table_key(self) -> Result<VideoHandle, AndroidBridgeError> {
+        if self.0 & DIRECTORY_HANDLE_FLAG == 0 || self.0 == DIRECTORY_HANDLE_FLAG {
+            return Err(AndroidBridgeError::InvalidConfig(
+                "invalid directory handle",
+            ));
+        }
+        Ok(VideoHandle::from_raw(self.0 & !DIRECTORY_HANDLE_FLAG))
+    }
+}
+
+struct DirectorySession {
+    session: SessionConnection<TcpTransport>,
+    directory: FileHandle,
+    exhausted: bool,
+}
 
 /// Long-lived runtime and opaque-handle owner for the Android/JNI adapter.
 ///
@@ -266,6 +312,7 @@ struct VideoSession {
 pub struct AndroidEngine {
     runtime: Runtime,
     videos: HandleTable<VideoSession>,
+    directories: HandleTable<Mutex<DirectorySession>>,
     max_read_bytes: usize,
     reconnect_policy: ReadReconnectPolicy,
 }
@@ -291,6 +338,7 @@ impl AndroidEngine {
         Ok(Self {
             runtime,
             videos: HandleTable::new(),
+            directories: HandleTable::new(),
             max_read_bytes: config.max_read_bytes,
             reconnect_policy: ReadReconnectPolicy {
                 max_connect_attempts: config.read_reconnect_attempts,
@@ -423,53 +471,7 @@ impl AndroidEngine {
         }
 
         self.runtime.block_on(async move {
-            let SmbMutationRequest {
-                host,
-                port,
-                share,
-                path,
-                username,
-                password,
-                domain,
-                workstation,
-            } = request;
-            let mut client_guid = [0u8; 16];
-            let mut preauth_salt = [0u8; 32];
-            getrandom::fill(&mut client_guid).map_err(|_| AndroidBridgeError::RandomSource)?;
-            getrandom::fill(&mut preauth_salt).map_err(|_| AndroidBridgeError::RandomSource)?;
-
-            let transport =
-                TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
-            let mut connection = Connection::new(transport);
-            connection
-                .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
-                .await?;
-
-            let mut session = if username.is_empty() {
-                let mut auth = AnonymousNtlmProvider::new();
-                connection
-                    .session_setup(&mut auth, SessionSetupConfig::default())
-                    .await?
-            } else {
-                let mut credentials = NtlmCredentials::new(username, password);
-                if !domain.is_empty() {
-                    credentials = credentials.with_domain(domain);
-                }
-                if !workstation.is_empty() {
-                    credentials = credentials.with_workstation(workstation);
-                }
-                let mut auth = NtlmV2Provider::new(credentials);
-                connection
-                    .session_setup(&mut auth, SessionSetupConfig::default())
-                    .await?
-            };
-
-            let tree = session
-                .tree_connect(
-                    format!(r"\\{}\{}", host, share),
-                    TreeConnectOptions::default(),
-                )
-                .await?;
+            let (mut session, tree, path) = connect_share(request).await?;
             match operation {
                 FileMutation::Mkdir => smb_io_fs::mkdir(&mut session, &tree, path).await?,
                 FileMutation::Rename { destination } => {
@@ -481,6 +483,70 @@ impl AndroidEngine {
             }
             Ok(())
         })
+    }
+
+    /// Open one share-relative directory and retain the server's QUERY_DIRECTORY scan cursor.
+    pub fn open_directory(
+        &self,
+        request: SmbMutationRequest,
+    ) -> Result<DirectoryHandle, AndroidBridgeError> {
+        validate_directory_request(&request)?;
+        let session = self.runtime.block_on(async move {
+            let (mut session, tree, path) = connect_share(request).await?;
+            let directory = session
+                .open_file(&tree, &path, FileOpenOptions::read_existing_directory())
+                .await?;
+            Ok::<_, AndroidBridgeError>(DirectorySession {
+                session,
+                directory,
+                exhausted: false,
+            })
+        })?;
+        let id = self.directories.insert(Mutex::new(session))?;
+        Ok(DirectoryHandle(id.raw() | DIRECTORY_HANDLE_FLAG))
+    }
+
+    /// Return exactly one server QUERY_DIRECTORY page, or an XFL1 zero-count EOF page.
+    /// Pages are independent of total folder size and never restart the remote scan.
+    pub fn read_directory_page(
+        &self,
+        handle: DirectoryHandle,
+    ) -> Result<Vec<u8>, AndroidBridgeError> {
+        let entry = self.directories.get(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        if state.exhausted {
+            return encode_directory_metadata(&[]);
+        }
+        let DirectorySession {
+            session,
+            directory,
+            exhausted,
+        } = &mut *state;
+        let options = QueryDirectoryOptions::new(
+            FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
+            "*",
+            DIRECTORY_QUERY_BUFFER_BYTES,
+        );
+        let buffer = self
+            .runtime
+            .block_on(session.query_directory(directory, options))?;
+        if buffer.is_empty() {
+            *exhausted = true;
+            return encode_directory_metadata(&[]);
+        }
+        let entries = decode_file_id_full_directory_metadata(&buffer)?;
+        encode_directory_metadata(&entries)
+    }
+
+    /// Remove the handle and close the SMB directory. A later read cannot resurrect its cursor.
+    pub fn close_directory(&self, handle: DirectoryHandle) -> Result<(), AndroidBridgeError> {
+        let entry = self.directories.remove(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        let directory = state.directory.clone();
+        self.runtime
+            .block_on(state.session.close_file(directory, CloseOptions::default()))
+            .map(|_| ())
+            .map_err(AndroidBridgeError::from)
     }
 
     fn validate_read_length(&self, length: usize) -> Result<(), AndroidBridgeError> {
@@ -509,6 +575,106 @@ fn map_broker_error(error: BrokerError) -> AndroidBridgeError {
 
 fn cancelled_bridge_error() -> AndroidBridgeError {
     AndroidBridgeError::Stream(StreamError::Client(ClientError::Cancelled))
+}
+
+const MAX_DIRECTORY_RESULT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Build one complete, versioned little-endian payload or fail; never return truncated entries.
+fn encode_directory_metadata(
+    entries: &[DirectoryMetadataEntry],
+) -> Result<Vec<u8>, AndroidBridgeError> {
+    let count = u32::try_from(entries.len())
+        .map_err(|_| AndroidBridgeError::InvalidConfig("directory entry count exceeds u32"))?;
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(b"XFL1");
+    bytes.extend_from_slice(&count.to_le_bytes());
+    for entry in entries {
+        let name = entry.name.as_bytes();
+        let name_length = u32::try_from(name.len())
+            .map_err(|_| AndroidBridgeError::InvalidConfig("directory name too long"))?;
+        let required = 4usize
+            .checked_add(name.len())
+            .and_then(|size| size.checked_add(28))
+            .and_then(|size| size.checked_add(bytes.len()))
+            .ok_or(AndroidBridgeError::InvalidConfig(
+                "directory listing length overflow",
+            ))?;
+        if required > MAX_DIRECTORY_RESULT_BYTES {
+            return Err(AndroidBridgeError::InvalidConfig(
+                "directory listing exceeds maximum JNI payload",
+            ));
+        }
+        bytes.extend_from_slice(&name_length.to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(&entry.file_attributes.to_le_bytes());
+        bytes.extend_from_slice(&entry.end_of_file.to_le_bytes());
+        bytes.extend_from_slice(&entry.creation_time.to_le_bytes());
+        bytes.extend_from_slice(&entry.last_write_time.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+/// A read-only query may address the share root with an empty path.
+fn validate_directory_request(request: &SmbMutationRequest) -> Result<(), AndroidBridgeError> {
+    if request.path.is_empty() {
+        let mut root = SmbMutationRequest::new(&request.host, &request.share, "root", "", "");
+        root.port = request.port;
+        return validate_mutation_request(&root);
+    }
+    validate_mutation_request(request)
+}
+
+/// Shared signed/authenticated SMB session for the one-shot mutations and directory queries.
+async fn connect_share(
+    request: SmbMutationRequest,
+) -> Result<(SessionConnection<TcpTransport>, TreeHandle, String), AndroidBridgeError> {
+    let SmbMutationRequest {
+        host,
+        port,
+        share,
+        path,
+        username,
+        password,
+        domain,
+        workstation,
+    } = request;
+    let mut client_guid = [0u8; 16];
+    let mut preauth_salt = [0u8; 32];
+    getrandom::fill(&mut client_guid).map_err(|_| AndroidBridgeError::RandomSource)?;
+    getrandom::fill(&mut preauth_salt).map_err(|_| AndroidBridgeError::RandomSource)?;
+
+    let transport = TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
+    let mut connection = Connection::new(transport);
+    connection
+        .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
+        .await?;
+
+    let mut session = if username.is_empty() {
+        let mut auth = AnonymousNtlmProvider::new();
+        connection
+            .session_setup(&mut auth, SessionSetupConfig::default())
+            .await?
+    } else {
+        let mut credentials = NtlmCredentials::new(username, password);
+        if !domain.is_empty() {
+            credentials = credentials.with_domain(domain);
+        }
+        if !workstation.is_empty() {
+            credentials = credentials.with_workstation(workstation);
+        }
+        let mut auth = NtlmV2Provider::new(credentials);
+        connection
+            .session_setup(&mut auth, SessionSetupConfig::default())
+            .await?
+    };
+
+    let tree = session
+        .tree_connect(
+            format!(r"\\{}\{}", host, share),
+            TreeConnectOptions::default(),
+        )
+        .await?;
+    Ok((session, tree, path))
 }
 
 fn validate_mutation_request(request: &SmbMutationRequest) -> Result<(), AndroidBridgeError> {
@@ -667,7 +833,7 @@ mod tests {
     }
     #[test]
     fn mkdir_contract_requires_new_jni_generation() {
-        assert_eq!(crate::API_VERSION, 4);
+        assert_eq!(crate::API_VERSION, 5);
     }
 
     #[test]
@@ -751,5 +917,121 @@ mod tests {
         assert!(validate_mutation_path("root/サンプル/実験.mkv").is_ok());
         assert!(validate_mutation_path(r"root\ファイル.txt").is_ok());
         assert!(validate_mutation_path("valid-name.txt").is_ok());
+    }
+    #[test]
+    fn directory_query_rejects_unsafe_paths_without_network_access() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in [
+            "/absolute",
+            r"\absolute",
+            "../parent",
+            "./dot",
+            r"foo\..\bar",
+            "nul\0name",
+        ] {
+            let request = SmbMutationRequest::new("no-such-host.invalid", "files", path, "", "");
+            assert!(
+                matches!(
+                    engine.open_directory(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "accepted unsafe directory path: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_root_is_valid_and_unicode_relative_paths_are_unchanged() {
+        let root = SmbMutationRequest::new("nas.local", "files", "", "", "");
+        assert!(validate_directory_request(&root).is_ok());
+        let unicode = SmbMutationRequest::new("nas.local", "files", "root/映画", "user", "secret");
+        assert!(validate_directory_request(&unicode).is_ok());
+    }
+
+    #[test]
+    fn directory_binary_contract_encodes_unicode_name_and_metadata() {
+        let entry = smb_io_fs::DirectoryMetadataEntry {
+            file_index: 3,
+            name: "映画\t一.mkv".to_string(),
+            file_attributes: 0x22,
+            end_of_file: 123,
+            allocation_size: 4096,
+            creation_time: 133_000_000_000_000_000,
+            last_write_time: 133_001_000_000_000_000,
+        };
+        let bytes = encode_directory_metadata(&[entry]).unwrap();
+        assert_eq!(&bytes[0..4], b"XFL1");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
+        let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[12..12 + length], "映画\t一.mkv".as_bytes());
+        let pos = 12 + length;
+        assert_eq!(
+            u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()),
+            0x22
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[pos + 4..pos + 12].try_into().unwrap()),
+            123
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[pos + 12..pos + 20].try_into().unwrap()),
+            133_000_000_000_000_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[pos + 20..pos + 28].try_into().unwrap()),
+            133_001_000_000_000_000
+        );
+        assert_eq!(bytes.len(), pos + 28);
+    }
+
+    #[test]
+    fn directory_cursor_handle_contract_is_independent_from_video_handles() {
+        // A live directory session keeps its SMB cursor across repeated read calls.
+        // The native API no longer returns one giant ByteArray for a whole folder.
+        let _open: fn(
+            &AndroidEngine,
+            SmbMutationRequest,
+        ) -> Result<DirectoryHandle, AndroidBridgeError> = AndroidEngine::open_directory;
+        let _next: fn(&AndroidEngine, DirectoryHandle) -> Result<Vec<u8>, AndroidBridgeError> =
+            AndroidEngine::read_directory_page;
+        let _close: fn(&AndroidEngine, DirectoryHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::close_directory;
+    }
+
+    #[test]
+    fn directory_eof_page_is_distinct_from_any_nonempty_data_page() {
+        assert_eq!(encode_directory_metadata(&[]).unwrap(), b"XFL1\0\0\0\0");
+        let entry = smb_io_fs::DirectoryMetadataEntry {
+            file_index: 0,
+            name: "item".to_owned(),
+            file_attributes: 0,
+            end_of_file: 0,
+            allocation_size: 0,
+            creation_time: 0,
+            last_write_time: 0,
+        };
+        assert_ne!(
+            encode_directory_metadata(&[entry]).unwrap(),
+            b"XFL1\0\0\0\0"
+        );
+    }
+
+    #[test]
+    fn directory_binary_contract_reports_empty_directory_with_header() {
+        assert_eq!(encode_directory_metadata(&[]).unwrap(), b"XFL1\0\0\0\0");
+    }
+
+    #[test]
+    fn directory_binary_contract_rejects_oversized_single_page() {
+        let entry = smb_io_fs::DirectoryMetadataEntry {
+            file_index: 0,
+            name: "a".repeat(MAX_DIRECTORY_RESULT_BYTES),
+            file_attributes: 0,
+            end_of_file: 0,
+            allocation_size: 0,
+            creation_time: 0,
+            last_write_time: 0,
+        };
+        assert!(encode_directory_metadata(&[entry]).is_err());
     }
 }
