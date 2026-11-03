@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 smb-io-client = { path = "../smb-client" }
+smb-io-wire = { path = "../smb-wire" }
 
 [lints]
 workspace = true
