@@ -43,12 +43,17 @@ jobs:
             -o dist/jniLibs \
             build --release -p smb-io-android
 
-      - name: Verify JNI outputs
+      - name: Verify JNI outputs and phase 9 entry point
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          test -f dist/jniLibs/arm64-v8a/libsmb_io_android.so
-          test -f dist/jniLibs/armeabi-v7a/libsmb_io_android.so
-          test -f dist/jniLibs/x86_64/libsmb_io_android.so
-          find dist/jniLibs -type f -name 'libsmb_io_android.so' -print
+          LLVM_NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          for ABI in arm64-v8a armeabi-v7a x86_64; do
+            SO="dist/jniLibs/$ABI/libsmb_io_android.so"
+            test -f "$SO"
+            "$LLVM_NM" -D "$SO" | grep -q 'Java_app_local1st_files_core_fs_rust_RustSmbNative_nativeMkdir'
+            "$LLVM_NM" -D "$SO" | grep -q 'Java_app_local1st_files_core_fs_rust_RustSmbNative_nativePrefetch'
+          done
 
       - uses: actions/upload-artifact@v4
         with:
