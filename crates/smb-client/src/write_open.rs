@@ -49,6 +49,18 @@ mod create_file_contract_tests {
     use super::*;
 
     #[test]
+    fn overwrite_stream_requires_only_generic_write_and_truncates_existing_content() {
+        let options = FileOpenOptions::overwrite_for_stream();
+        assert_eq!(options.create_disposition, create_disposition::OVERWRITE_IF);
+        assert_eq!(options.desired_access, desired_access::GENERIC_WRITE);
+        assert_ne!(
+            options.create_options & create_options::NON_DIRECTORY_FILE,
+            0
+        );
+        assert_eq!(options.share_access, share_access::READ | share_access::WRITE | share_access::DELETE);
+    }
+
+    #[test]
     fn new_file_uses_create_not_overwrite_or_open_if() {
         let new_file = FileOpenOptions::create_new_random();
         assert_eq!(new_file.create_disposition, create_disposition::CREATE);
