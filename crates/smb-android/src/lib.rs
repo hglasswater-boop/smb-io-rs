@@ -7,8 +7,8 @@ mod engine;
 mod jni;
 
 pub use engine::{
-    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, DirectoryHandle, SmbMutationRequest,
-    RandomHandle, VideoHandle, VideoOpenRequest, WritableHandle,
+    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, DirectoryHandle, RandomHandle,
+    SmbMutationRequest, VideoHandle, VideoOpenRequest, WritableHandle,
 };
 
 /// Android bridge API generation for video, mutations and read-only directory metadata.
