@@ -367,7 +367,9 @@ impl RandomHandle {
             || self.0 & (DIRECTORY_HANDLE_FLAG | WRITABLE_HANDLE_FLAG | (1u64 << 63)) != 0
             || self.0 == RANDOM_HANDLE_FLAG
         {
-            return Err(AndroidBridgeError::InvalidConfig("invalid random-access handle"));
+            return Err(AndroidBridgeError::InvalidConfig(
+                "invalid random-access handle",
+            ));
         }
         Ok(VideoHandle::from_raw(self.0 & !RANDOM_HANDLE_FLAG))
     }
@@ -775,12 +777,18 @@ impl AndroidEngine {
         let entry = self.randoms.get(handle.table_key()?)?;
         let mut state = lock(&entry.state)?;
         if entry.closing.load(Ordering::Acquire) || state.poisoned {
-            return Err(AndroidBridgeError::InternalState("random-access SMB handle is closed or failed"));
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
         }
         if length == 0 {
             return Ok(Vec::new());
         }
-        let RandomSession { session, file, poisoned } = &mut *state;
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
         match self.runtime.block_on(session.read_at(file, offset, length)) {
             Ok(bytes) => Ok(bytes),
             Err(error) => {
@@ -803,21 +811,32 @@ impl AndroidEngine {
                 maximum: MAX_JNI_WRITE_BYTES,
             });
         }
-        let end = offset.checked_add(data.len() as u64).ok_or(
-            AndroidBridgeError::InvalidConfig("random-access write offset overflow")
-        )?;
+        let end =
+            offset
+                .checked_add(data.len() as u64)
+                .ok_or(AndroidBridgeError::InvalidConfig(
+                    "random-access write offset overflow",
+                ))?;
         if end > i64::MAX as u64 {
-            return Err(AndroidBridgeError::InvalidConfig("random-access write exceeds signed EOF"));
+            return Err(AndroidBridgeError::InvalidConfig(
+                "random-access write exceeds signed EOF",
+            ));
         }
         let entry = self.randoms.get(handle.table_key()?)?;
         let mut state = lock(&entry.state)?;
         if entry.closing.load(Ordering::Acquire) || state.poisoned {
-            return Err(AndroidBridgeError::InternalState("random-access SMB handle is closed or failed"));
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
         }
         if data.is_empty() {
             return Ok(0);
         }
-        let RandomSession { session, file, poisoned } = &mut *state;
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
         match self.runtime.block_on(session.write_at(file, offset, data)) {
             Ok(count) if count == data.len() => {
                 file.record_confirmed_len(file.len().max(end));
@@ -825,7 +844,9 @@ impl AndroidEngine {
             }
             Ok(_) => {
                 *poisoned = true;
-                Err(AndroidBridgeError::InternalState("short random-access SMB WRITE"))
+                Err(AndroidBridgeError::InternalState(
+                    "short random-access SMB WRITE",
+                ))
             }
             Err(error) => {
                 *poisoned = true;
@@ -841,14 +862,22 @@ impl AndroidEngine {
         length: u64,
     ) -> Result<(), AndroidBridgeError> {
         if length > i64::MAX as u64 {
-            return Err(AndroidBridgeError::InvalidConfig("random-access length exceeds signed EOF"));
+            return Err(AndroidBridgeError::InvalidConfig(
+                "random-access length exceeds signed EOF",
+            ));
         }
         let entry = self.randoms.get(handle.table_key()?)?;
         let mut state = lock(&entry.state)?;
         if entry.closing.load(Ordering::Acquire) || state.poisoned {
-            return Err(AndroidBridgeError::InternalState("random-access SMB handle is closed or failed"));
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
         }
-        let RandomSession { session, file, poisoned } = &mut *state;
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
         match self.runtime.block_on(session.set_end_of_file(file, length)) {
             Ok(()) => {
                 file.record_confirmed_len(length);
@@ -865,9 +894,15 @@ impl AndroidEngine {
         let entry = self.randoms.get(handle.table_key()?)?;
         let mut state = lock(&entry.state)?;
         if entry.closing.load(Ordering::Acquire) || state.poisoned {
-            return Err(AndroidBridgeError::InternalState("random-access SMB handle is closed or failed"));
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
         }
-        let RandomSession { session, file, poisoned } = &mut *state;
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
         match self.runtime.block_on(session.flush_file(file)) {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -1453,12 +1488,16 @@ mod tests {
         let valid = RandomHandle::from_raw(RANDOM_HANDLE_FLAG | 1);
         assert_eq!(valid.table_key().unwrap().raw(), 1);
         assert!(RandomHandle::from_raw(1).table_key().is_err());
-        assert!(RandomHandle::from_raw(WRITABLE_HANDLE_FLAG | 1)
-            .table_key()
-            .is_err());
-        assert!(RandomHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1)
-            .table_key()
-            .is_err());
+        assert!(
+            RandomHandle::from_raw(WRITABLE_HANDLE_FLAG | 1)
+                .table_key()
+                .is_err()
+        );
+        assert!(
+            RandomHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1)
+                .table_key()
+                .is_err()
+        );
         assert!(WritableHandle::from_raw(valid.raw()).table_key().is_err());
         assert!(DirectoryHandle::from_raw(valid.raw()).table_key().is_err());
     }
