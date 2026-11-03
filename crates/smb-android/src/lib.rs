@@ -11,5 +11,5 @@ pub use engine::{
     VideoOpenRequest,
 };
 
-/// Android bridge API generation that adds one-shot non-retrying mkdir to the video API.
-pub const API_VERSION: u32 = 3;
+/// Android bridge API generation for one-shot mkdir, rename and file-only delete.
+pub const API_VERSION: u32 = 4;

@@ -59,6 +59,41 @@ fn rust_string(env: &mut Env<'_>, value: &JString<'_>) -> JniResult<String> {
     value.try_to_string(env)
 }
 
+/// Convert and validate JNI mutation connection arguments once for all one-shot operations.
+#[allow(clippy::too_many_arguments)]
+fn mutation_request(
+    env: &mut Env<'_>,
+    host: &JString<'_>,
+    port: jint,
+    share: &JString<'_>,
+    path: &JString<'_>,
+    username: &JString<'_>,
+    password: &JString<'_>,
+    domain: &JString<'_>,
+    workstation: &JString<'_>,
+) -> JniResult<Option<SmbMutationRequest>> {
+    let Ok(port) = u16::try_from(port) else {
+        throw_argument::<()>(env, "SMB port must be between 1 and 65535")?;
+        return Ok(None);
+    };
+    if port == 0 {
+        throw_argument::<()>(env, "SMB port must be between 1 and 65535")?;
+        return Ok(None);
+    }
+
+    let mut request = SmbMutationRequest::new(
+        rust_string(env, host)?,
+        rust_string(env, share)?,
+        rust_string(env, path)?,
+        rust_string(env, username)?,
+        rust_string(env, password)?,
+    );
+    request.port = port;
+    request.domain = rust_string(env, domain)?;
+    request.workstation = rust_string(env, workstation)?;
+    Ok(Some(request))
+}
+
 /// Reinterprets the exact same byte bits for JNI's signed `jbyte` element type.
 ///
 /// # Safety
@@ -146,29 +181,113 @@ pub fn native_mkdir<'local>(
 ) {
     unowned_env
         .with_env(|env| -> JniResult<()> {
-            let Ok(port) = u16::try_from(port) else {
-                return throw_argument(env, "SMB port must be between 1 and 65535");
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(());
             };
-            if port == 0 {
-                return throw_argument(env, "SMB port must be between 1 and 65535");
-            }
-
-            let mut request = SmbMutationRequest::new(
-                rust_string(env, &host)?,
-                rust_string(env, &share)?,
-                rust_string(env, &path)?,
-                rust_string(env, &username)?,
-                rust_string(env, &password)?,
-            );
-            request.port = port;
-            request.domain = rust_string(env, &domain)?;
-            request.workstation = rust_string(env, &workstation)?;
-
             let engine = match engine() {
                 Ok(engine) => engine,
                 Err(error) => return throw_io(env, error),
             };
             match engine.mkdir(request) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Renames one entry inside its connected share, with no replace or retry.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_rename<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    source: JString<'local>,
+    destination: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &source,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(());
+            };
+            let destination = rust_string(env, &destination)?;
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.rename(request, destination) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Deletes one regular file, without read-only recovery or directory recursion.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_delete_file<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    path: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(());
+            };
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.delete_file(request) {
                 Ok(()) => Ok(()),
                 Err(error) => throw_io(env, error),
             }

@@ -248,6 +248,12 @@ impl<T> HandleTable<T> {
     }
 }
 
+enum FileMutation {
+    Mkdir,
+    Rename { destination: String },
+    DeleteFile,
+}
+
 struct VideoSession {
     broker: VideoBrokerHandle,
 }
@@ -385,38 +391,72 @@ impl AndroidEngine {
             .map_err(map_broker_error)
     }
 
-    /// Creates one directory. No mutation is replayed after a transport failure.
-    ///
-    /// Connection reuse across operations is a later phase. Keep the temporary single-operation
-    /// session local to this method rather than mixing mutation state with playback handles.
+    /// Create one directory. A transport failure never triggers mutation replay.
     pub fn mkdir(&self, request: SmbMutationRequest) -> Result<(), AndroidBridgeError> {
-        validate_mkdir_request(&request)?;
+        self.mutate(request, FileMutation::Mkdir)
+    }
+
+    /// Rename an existing entry inside the same share, without replacing an existing destination.
+    pub fn rename(
+        &self,
+        request: SmbMutationRequest,
+        destination: String,
+    ) -> Result<(), AndroidBridgeError> {
+        self.mutate(request, FileMutation::Rename { destination })
+    }
+
+    /// Delete one regular file only. Directory removal is a separate operation.
+    pub fn delete_file(&self, request: SmbMutationRequest) -> Result<(), AndroidBridgeError> {
+        self.mutate(request, FileMutation::DeleteFile)
+    }
+
+    /// One authenticated session per mutation. Do not repeat the operation if the server response
+    /// is lost, because its outcome cannot safely be inferred from a transport error.
+    fn mutate(
+        &self,
+        request: SmbMutationRequest,
+        operation: FileMutation,
+    ) -> Result<(), AndroidBridgeError> {
+        validate_mutation_request(&request)?;
+        if let FileMutation::Rename { ref destination } = operation {
+            validate_mutation_path(destination)?;
+        }
+
         self.runtime.block_on(async move {
+            let SmbMutationRequest {
+                host,
+                port,
+                share,
+                path,
+                username,
+                password,
+                domain,
+                workstation,
+            } = request;
             let mut client_guid = [0u8; 16];
             let mut preauth_salt = [0u8; 32];
             getrandom::fill(&mut client_guid).map_err(|_| AndroidBridgeError::RandomSource)?;
             getrandom::fill(&mut preauth_salt).map_err(|_| AndroidBridgeError::RandomSource)?;
 
             let transport =
-                TcpTransport::connect(&request.host, request.port, TcpTransportConfig::default())
-                    .await?;
+                TcpTransport::connect(&host, port, TcpTransportConfig::default()).await?;
             let mut connection = Connection::new(transport);
             connection
                 .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
                 .await?;
 
-            let mut session = if request.username.is_empty() {
+            let mut session = if username.is_empty() {
                 let mut auth = AnonymousNtlmProvider::new();
                 connection
                     .session_setup(&mut auth, SessionSetupConfig::default())
                     .await?
             } else {
-                let mut credentials = NtlmCredentials::new(request.username, request.password);
-                if !request.domain.is_empty() {
-                    credentials = credentials.with_domain(request.domain);
+                let mut credentials = NtlmCredentials::new(username, password);
+                if !domain.is_empty() {
+                    credentials = credentials.with_domain(domain);
                 }
-                if !request.workstation.is_empty() {
-                    credentials = credentials.with_workstation(request.workstation);
+                if !workstation.is_empty() {
+                    credentials = credentials.with_workstation(workstation);
                 }
                 let mut auth = NtlmV2Provider::new(credentials);
                 connection
@@ -426,11 +466,19 @@ impl AndroidEngine {
 
             let tree = session
                 .tree_connect(
-                    format!(r"\\{}\{}", request.host, request.share),
+                    format!(r"\\{}\{}", host, share),
                     TreeConnectOptions::default(),
                 )
                 .await?;
-            smb_io_fs::mkdir(&mut session, &tree, request.path).await?;
+            match operation {
+                FileMutation::Mkdir => smb_io_fs::mkdir(&mut session, &tree, path).await?,
+                FileMutation::Rename { destination } => {
+                    smb_io_fs::rename(&mut session, &tree, path, destination, false).await?
+                }
+                FileMutation::DeleteFile => {
+                    smb_io_fs::delete_file(&mut session, &tree, path).await?
+                }
+            }
             Ok(())
         })
     }
@@ -463,7 +511,7 @@ fn cancelled_bridge_error() -> AndroidBridgeError {
     AndroidBridgeError::Stream(StreamError::Client(ClientError::Cancelled))
 }
 
-fn validate_mkdir_request(request: &SmbMutationRequest) -> Result<(), AndroidBridgeError> {
+fn validate_mutation_request(request: &SmbMutationRequest) -> Result<(), AndroidBridgeError> {
     if request.host.is_empty() || request.host.contains(['\\', '/', '\0']) {
         return Err(AndroidBridgeError::InvalidConfig(
             "host must be a non-empty DNS name or IP address",
@@ -479,18 +527,21 @@ fn validate_mkdir_request(request: &SmbMutationRequest) -> Result<(), AndroidBri
             "share must be a single non-empty share name",
         ));
     }
-    if request.path.is_empty()
-        || request.path.starts_with('\\')
-        || request.path.starts_with('/')
-        || request.path.contains('\0')
-        || request
-            .path
+    validate_mutation_path(&request.path)
+}
+
+fn validate_mutation_path(path: &str) -> Result<(), AndroidBridgeError> {
+    if path.is_empty()
+        || path.starts_with('\\')
+        || path.starts_with('/')
+        || path.contains('\0')
+        || path
             .replace('\\', "/")
             .split('/')
             .any(|component| component == "." || component == "..")
     {
         return Err(AndroidBridgeError::InvalidConfig(
-            "mkdir path must be a non-empty share-relative path without dot components or NUL",
+            "mutation path must be share-relative, non-empty, and contain no dot components or NUL",
         ));
     }
     Ok(())
@@ -616,7 +667,7 @@ mod tests {
     }
     #[test]
     fn mkdir_contract_requires_new_jni_generation() {
-        assert_eq!(crate::API_VERSION, 3);
+        assert_eq!(crate::API_VERSION, 4);
     }
 
     #[test]
@@ -633,7 +684,7 @@ mod tests {
         ] {
             let request = SmbMutationRequest::new("nas.local", "media", path, "user", "password");
             assert!(
-                validate_mkdir_request(&request).is_err(),
+                validate_mutation_request(&request).is_err(),
                 "accepted invalid path: {path:?}"
             );
         }
@@ -643,11 +694,62 @@ mod tests {
     fn mkdir_contract_validates_connection_and_accepts_unicode_relative_path() {
         let mut request =
             SmbMutationRequest::new("nas.local", "media", "folder/日本語", "user", "password");
-        assert!(validate_mkdir_request(&request).is_ok());
+        assert!(validate_mutation_request(&request).is_ok());
         request.port = 0;
-        assert!(validate_mkdir_request(&request).is_err());
+        assert!(validate_mutation_request(&request).is_err());
         request.port = 445;
         request.share = "media/other".to_string();
-        assert!(validate_mkdir_request(&request).is_err());
+        assert!(validate_mutation_request(&request).is_err());
+    }
+    #[test]
+    fn rename_rejects_unsafe_destination_before_any_network_activity() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for destination in [
+            "",
+            "/absolute",
+            r"\absolute",
+            "..",
+            "dir/../escape",
+            "dir/./name",
+            "null\0byte",
+        ] {
+            let request =
+                SmbMutationRequest::new("nas.local", "media", "good/source.txt", "user", "secret");
+            assert!(
+                matches!(
+                    engine.rename(request, destination.to_owned()),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "unsafe destination passed validation: {destination:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_file_rejects_unsafe_source_before_any_network_activity() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in [
+            "",
+            "../escape",
+            "parent/../../outside",
+            "/absolute",
+            "bad\0name",
+        ] {
+            let request = SmbMutationRequest::new("nas.local", "media", path, "", "");
+            assert!(
+                matches!(
+                    engine.delete_file(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "unsafe file delete path passed validation: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_path_accepts_share_relative_unicode_without_rewriting_names() {
+        assert!(validate_mutation_path("root/サンプル/実験.mkv").is_ok());
+        assert!(validate_mutation_path(r"root\ファイル.txt").is_ok());
+        assert!(validate_mutation_path("valid-name.txt").is_ok());
     }
 }
