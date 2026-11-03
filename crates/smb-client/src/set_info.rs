@@ -39,7 +39,9 @@ where
         file: &FileHandle,
         length: u64,
     ) -> Result<(), ClientError> {
-        let payload = smb_io_wire::FileEndOfFileInformation::new(length)?.encode().to_vec();
+        let payload = smb_io_wire::FileEndOfFileInformation::new(length)?
+            .encode()
+            .to_vec();
         self.set_info(
             file,
             SetInfoOptions::file(
