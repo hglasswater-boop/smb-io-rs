@@ -11,5 +11,5 @@ pub use engine::{
     VideoOpenRequest,
 };
 
-/// Android bridge API generation for one-shot mkdir, rename and file-only delete.
-pub const API_VERSION: u32 = 4;
+/// Android bridge API generation for video, mutations and read-only directory metadata.
+pub const API_VERSION: u32 = 5;
