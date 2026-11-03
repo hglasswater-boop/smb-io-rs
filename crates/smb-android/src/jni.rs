@@ -465,7 +465,7 @@ pub fn native_read_random_at<'local>(
                     "random SMB handle and read position must be nonnegative",
                 );
             }
-            if destination_offset < 0 || length < 0 || length > 1024 * 1024 {
+            if destination_offset < 0 || !(0..=1024 * 1024).contains(&length) {
                 return throw_argument(env, "random SMB read range invalid or exceeds 1 MiB");
             }
             let array_len = destination.len(env)?;
@@ -518,7 +518,7 @@ pub fn native_write_random_at<'local>(
                     "random SMB handle and write position must be nonnegative",
                 );
             }
-            if source_offset < 0 || length < 0 || length > 1024 * 1024 {
+            if source_offset < 0 || !(0..=1024 * 1024).contains(&length) {
                 return throw_argument(env, "random SMB write range invalid or exceeds 1 MiB");
             }
             let array_len = source.len(env)?;
