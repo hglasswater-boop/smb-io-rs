@@ -728,7 +728,13 @@ mod tests {
     #[test]
     fn delete_file_rejects_unsafe_source_before_any_network_activity() {
         let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
-        for path in ["", "../escape", "parent/../../outside", "/absolute", "bad\0name"] {
+        for path in [
+            "",
+            "../escape",
+            "parent/../../outside",
+            "/absolute",
+            "bad\0name",
+        ] {
             let request = SmbMutationRequest::new("nas.local", "media", path, "", "");
             assert!(
                 matches!(
@@ -746,5 +752,4 @@ mod tests {
         assert!(validate_mutation_path(r"root\ファイル.txt").is_ok());
         assert!(validate_mutation_path("valid-name.txt").is_ok());
     }
-
 }
