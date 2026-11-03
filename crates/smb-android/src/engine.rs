@@ -644,7 +644,11 @@ impl AndroidEngine {
         if data.is_empty() {
             return Ok(0);
         }
-        let WritableSession { session, file, poisoned } = &mut *state;
+        let WritableSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
         match self.runtime.block_on(session.write_at(file, offset, data)) {
             Ok(count) => Ok(count),
             Err(error) => {
@@ -663,7 +667,11 @@ impl AndroidEngine {
                 "writable SMB handle cannot be flushed after failure",
             ));
         }
-        let WritableSession { session, file, poisoned } = &mut *state;
+        let WritableSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
         match self.runtime.block_on(session.flush_file(file)) {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -1184,14 +1192,25 @@ mod tests {
         let valid = WritableHandle::from_raw(WRITABLE_HANDLE_FLAG | 1);
         assert_eq!(valid.table_key().unwrap().raw(), 1);
         assert!(WritableHandle::from_raw(1).table_key().is_err());
-        assert!(WritableHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1).table_key().is_err());
+        assert!(
+            WritableHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1)
+                .table_key()
+                .is_err()
+        );
         assert!(DirectoryHandle::from_raw(valid.raw()).table_key().is_err());
     }
 
     #[test]
     fn writable_open_rejects_unsafe_paths_before_network() {
         let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
-        for path in ["", "../escape", "/absolute", r"\absolute", "./dot", "nul\0name"] {
+        for path in [
+            "",
+            "../escape",
+            "/absolute",
+            r"\absolute",
+            "./dot",
+            "nul\0name",
+        ] {
             let request = SmbMutationRequest::new("no-such-host.invalid", "share", path, "", "");
             assert!(
                 matches!(
