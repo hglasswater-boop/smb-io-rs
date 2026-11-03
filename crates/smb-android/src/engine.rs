@@ -484,4 +484,28 @@ mod tests {
         let request = VideoOpenRequest::new("nas.local", "video", "movies/sample.mkv", "", "");
         assert!(validate_open_request(&request).is_ok());
     }
+    #[test]
+    fn mkdir_contract_requires_new_jni_generation() {
+        assert_eq!(crate::API_VERSION, 3);
+    }
+
+    #[test]
+    fn mkdir_contract_rejects_unsafe_paths_before_connect() {
+        for path in ["", "/absolute", "\\absolute", "../escape", "./name", "parent/../name", "dir\\..\\name", "bad\u0000name"] {
+            let request = SmbMutationRequest::new("nas.local", "media", path, "user", "password");
+            assert!(validate_mkdir_request(&request).is_err(), "accepted invalid path: {path:?}");
+        }
+    }
+
+    #[test]
+    fn mkdir_contract_validates_connection_and_accepts_unicode_relative_path() {
+        let mut request = SmbMutationRequest::new("nas.local", "media", "folder/日本語", "user", "password");
+        assert!(validate_mkdir_request(&request).is_ok());
+        request.port = 0;
+        assert!(validate_mkdir_request(&request).is_err());
+        request.port = 445;
+        request.share = "media/other".to_string();
+        assert!(validate_mkdir_request(&request).is_err());
+    }
+
 }
