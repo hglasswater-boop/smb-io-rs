@@ -616,7 +616,7 @@ mod tests {
     }
     #[test]
     fn mkdir_contract_requires_new_jni_generation() {
-        assert_eq!(crate::API_VERSION, 3);
+        assert_eq!(crate::API_VERSION, 4);
     }
 
     #[test]
@@ -650,4 +650,50 @@ mod tests {
         request.share = "media/other".to_string();
         assert!(validate_mkdir_request(&request).is_err());
     }
+    #[test]
+    fn rename_rejects_unsafe_destination_before_any_network_activity() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for destination in [
+            "",
+            "/absolute",
+            r"\absolute",
+            "..",
+            "dir/../escape",
+            "dir/./name",
+            "null\0byte",
+        ] {
+            let request =
+                SmbMutationRequest::new("nas.local", "media", "good/source.txt", "user", "secret");
+            assert!(
+                matches!(
+                    engine.rename(request, destination.to_owned()),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "unsafe destination passed validation: {destination:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_file_rejects_unsafe_source_before_any_network_activity() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in ["", "../escape", "parent/../../outside", "/absolute", "bad\0name"] {
+            let request = SmbMutationRequest::new("nas.local", "media", path, "", "");
+            assert!(
+                matches!(
+                    engine.delete_file(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "unsafe file delete path passed validation: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_path_accepts_share_relative_unicode_without_rewriting_names() {
+        assert!(validate_mutation_path("root/サンプル/実験.mkv").is_ok());
+        assert!(validate_mutation_path(r"root\ファイル.txt").is_ok());
+        assert!(validate_mutation_path("valid-name.txt").is_ok());
+    }
+
 }
