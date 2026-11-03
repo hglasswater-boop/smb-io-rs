@@ -13,7 +13,10 @@ use jni::strings::{JNIStr, JNIString};
 use jni::sys::{jbyte, jint, jlong};
 use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
-use crate::{API_VERSION, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest};
+use crate::{
+    API_VERSION, AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoHandle,
+    VideoOpenRequest,
+};
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
 
@@ -120,6 +123,53 @@ pub fn native_open_video<'local>(
                     Ok(raw) => Ok(raw),
                     Err(_) => throw_io(env, "SMB native handle space exceeded Java Long range"),
                 },
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Creates a single directory. Never retries the mutation or falls back to another backend.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_mkdir<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    path: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            let Ok(port) = u16::try_from(port) else {
+                return throw_argument(env, "SMB port must be between 1 and 65535");
+            };
+            if port == 0 {
+                return throw_argument(env, "SMB port must be between 1 and 65535");
+            }
+
+            let mut request = SmbMutationRequest::new(
+                rust_string(env, &host)?,
+                rust_string(env, &share)?,
+                rust_string(env, &path)?,
+                rust_string(env, &username)?,
+                rust_string(env, &password)?,
+            );
+            request.port = port;
+            request.domain = rust_string(env, &domain)?;
+            request.workstation = rust_string(env, &workstation)?;
+
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.mkdir(request) {
+                Ok(()) => Ok(()),
                 Err(error) => throw_io(env, error),
             }
         })
