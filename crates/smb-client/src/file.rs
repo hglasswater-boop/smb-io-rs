@@ -90,6 +90,14 @@ impl FileHandle {
         self.end_of_file
     }
 
+    /// Update the open handle's cached logical EOF after a confirmed WRITE or SET_INFO.
+    ///
+    /// READ clamps requests using this length. Never update it after a failed or ambiguous
+    /// mutation: the remote result may be unknown.
+    pub fn record_confirmed_len(&mut self, length: u64) {
+        self.end_of_file = length;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.end_of_file == 0
     }
