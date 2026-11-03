@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
+use smb_io_fs::FsMutationError;
 use smb_io_client::{
-    ClientError, CloseInfo, ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError,
+    ClientError, CloseInfo, Connection, NegotiateConfig, ReadOnlyReconnectRecipe, ReadReconnectPolicy,
+    ReconnectError, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
 };
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
@@ -81,6 +84,7 @@ impl VideoOpenRequest {
 pub enum AndroidBridgeError {
     Runtime(std::io::Error),
     Client(ClientError),
+    Fs(FsMutationError),
     Stream(StreamError),
     InvalidHandle(VideoHandle),
     InvalidConfig(&'static str),
@@ -94,6 +98,7 @@ impl fmt::Display for AndroidBridgeError {
         match self {
             Self::Runtime(error) => write!(f, "Android SMB runtime error: {error}"),
             Self::Client(error) => write!(f, "SMB client error: {error}"),
+            Self::Fs(error) => write!(f, "SMB filesystem error: {error}"),
             Self::Stream(error) => write!(f, "SMB stream error: {error}"),
             Self::InvalidHandle(handle) => write!(f, "invalid SMB video handle {}", handle.raw()),
             Self::InvalidConfig(message) => {
@@ -116,6 +121,7 @@ impl Error for AndroidBridgeError {
         match self {
             Self::Runtime(error) => Some(error),
             Self::Client(error) => Some(error),
+            Self::Fs(error) => Some(error),
             Self::Stream(error) => Some(error),
             Self::InvalidHandle(_)
             | Self::InvalidConfig(_)
@@ -132,9 +138,49 @@ impl From<ClientError> for AndroidBridgeError {
     }
 }
 
+impl From<FsMutationError> for AndroidBridgeError {
+    fn from(value: FsMutationError) -> Self {
+        Self::Fs(value)
+    }
+}
+
 impl From<StreamError> for AndroidBridgeError {
     fn from(value: StreamError) -> Self {
         Self::Stream(value)
+    }
+}
+
+/// One-shot, non-retrying filesystem mutation request.
+/// Credentials are moved into the NTLM provider when authentication begins.
+pub struct SmbMutationRequest {
+    pub host: String,
+    pub port: u16,
+    pub share: String,
+    pub path: String,
+    pub username: String,
+    pub password: String,
+    pub domain: String,
+    pub workstation: String,
+}
+
+impl SmbMutationRequest {
+    pub fn new(
+        host: impl Into<String>,
+        share: impl Into<String>,
+        path: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            port: 445,
+            share: share.into(),
+            path: path.into(),
+            username: username.into(),
+            password: password.into(),
+            domain: String::new(),
+            workstation: String::new(),
+        }
     }
 }
 
@@ -338,6 +384,57 @@ impl AndroidEngine {
             .map_err(map_broker_error)
     }
 
+
+    /// Creates one directory. No mutation is replayed after a transport failure.
+    ///
+    /// Connection reuse across operations is a later phase. Keep the temporary single-operation
+    /// session local to this method rather than mixing mutation state with playback handles.
+    pub fn mkdir(&self, request: SmbMutationRequest) -> Result<(), AndroidBridgeError> {
+        validate_mkdir_request(&request)?;
+        self.runtime.block_on(async move {
+            let mut client_guid = [0u8; 16];
+            let mut preauth_salt = [0u8; 32];
+            getrandom::fill(&mut client_guid).map_err(|_| AndroidBridgeError::RandomSource)?;
+            getrandom::fill(&mut preauth_salt).map_err(|_| AndroidBridgeError::RandomSource)?;
+
+            let transport =
+                TcpTransport::connect(&request.host, request.port, TcpTransportConfig::default())
+                    .await?;
+            let mut connection = Connection::new(transport);
+            connection
+                .negotiate(&NegotiateConfig::modern(client_guid, preauth_salt.to_vec()))
+                .await?;
+
+            let mut session = if request.username.is_empty() {
+                let mut auth = AnonymousNtlmProvider::new();
+                connection
+                    .session_setup(&mut auth, SessionSetupConfig::default())
+                    .await?
+            } else {
+                let mut credentials = NtlmCredentials::new(request.username, request.password);
+                if !request.domain.is_empty() {
+                    credentials = credentials.with_domain(request.domain);
+                }
+                if !request.workstation.is_empty() {
+                    credentials = credentials.with_workstation(request.workstation);
+                }
+                let mut auth = NtlmV2Provider::new(credentials);
+                connection
+                    .session_setup(&mut auth, SessionSetupConfig::default())
+                    .await?
+            };
+
+            let tree = session
+                .tree_connect(
+                    format!(r"\\{}\{}", request.host, request.share),
+                    TreeConnectOptions::default(),
+                )
+                .await?;
+            smb_io_fs::mkdir(&mut session, &tree, request.path).await?;
+            Ok(())
+        })
+    }
+
     fn validate_read_length(&self, length: usize) -> Result<(), AndroidBridgeError> {
         if length > self.max_read_bytes {
             return Err(AndroidBridgeError::ReadTooLarge {
@@ -364,6 +461,33 @@ fn map_broker_error(error: BrokerError) -> AndroidBridgeError {
 
 fn cancelled_bridge_error() -> AndroidBridgeError {
     AndroidBridgeError::Stream(StreamError::Client(ClientError::Cancelled))
+}
+
+fn validate_mkdir_request(request: &SmbMutationRequest) -> Result<(), AndroidBridgeError> {
+    if request.host.is_empty() || request.host.contains(['\\', '/', '\0']) {
+        return Err(AndroidBridgeError::InvalidConfig(
+            "host must be a non-empty DNS name or IP address",
+        ));
+    }
+    if request.port == 0 {
+        return Err(AndroidBridgeError::InvalidConfig("port must be greater than zero"));
+    }
+    if request.share.is_empty() || request.share.contains(['\\', '/', '\0']) {
+        return Err(AndroidBridgeError::InvalidConfig(
+            "share must be a single non-empty share name",
+        ));
+    }
+    if request.path.is_empty()
+        || request.path.starts_with('\\')
+        || request.path.starts_with('/')
+        || request.path.contains('\0')
+        || request.path.replace('\\', "/").split('/').any(|component| component == "." || component == "..")
+    {
+        return Err(AndroidBridgeError::InvalidConfig(
+            "mkdir path must be a non-empty share-relative path without dot components or NUL",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_open_request(request: &VideoOpenRequest) -> Result<(), AndroidBridgeError> {
