@@ -7,7 +7,8 @@ mod engine;
 mod jni;
 
 pub use engine::{
-    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoHandle,
+    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, DirectoryHandle, SmbMutationRequest,
+    VideoHandle,
     VideoOpenRequest,
 };
 
