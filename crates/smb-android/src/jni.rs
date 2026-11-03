@@ -182,8 +182,17 @@ pub fn native_mkdir<'local>(
     unowned_env
         .with_env(|env| -> JniResult<()> {
             let Some(request) = mutation_request(
-                env, &host, port, &share, &path, &username, &password, &domain, &workstation,
-            )? else {
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
                 return Ok(());
             };
             let engine = match engine() {
@@ -217,8 +226,17 @@ pub fn native_rename<'local>(
     unowned_env
         .with_env(|env| -> JniResult<()> {
             let Some(request) = mutation_request(
-                env, &host, port, &share, &source, &username, &password, &domain, &workstation,
-            )? else {
+                env,
+                &host,
+                port,
+                &share,
+                &source,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
                 return Ok(());
             };
             let destination = rust_string(env, &destination)?;
@@ -252,8 +270,17 @@ pub fn native_delete_file<'local>(
     unowned_env
         .with_env(|env| -> JniResult<()> {
             let Some(request) = mutation_request(
-                env, &host, port, &share, &path, &username, &password, &domain, &workstation,
-            )? else {
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
                 return Ok(());
             };
             let engine = match engine() {
