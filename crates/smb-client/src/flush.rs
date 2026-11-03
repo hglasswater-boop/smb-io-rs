@@ -93,10 +93,12 @@ mod tests {
             validate_flush_status(StatusField::Status(denied)),
             Err(ClientError::ServerStatus(0xC000_0022))
         ));
-        assert!(validate_flush_status(StatusField::ChannelSequence {
-            sequence: 0,
-            reserved: 0,
-        })
-        .is_err());
+        assert!(
+            validate_flush_status(StatusField::ChannelSequence {
+                sequence: 0,
+                reserved: 0,
+            })
+            .is_err()
+        );
     }
 }
