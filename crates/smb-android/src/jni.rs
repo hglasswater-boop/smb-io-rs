@@ -164,6 +164,49 @@ pub fn native_open_video<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Read complete directory metadata as a versioned, bounded XFL1 byte buffer.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_list_directory<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    path: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) -> JByteArray<'local> {
+    unowned_env
+        .with_env(|env| -> JniResult<JByteArray<'local>> {
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(JByteArray::null());
+            };
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.list_directory(request) {
+                Ok(encoded) => env.byte_array_from_slice(&encoded),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Creates a single directory. Never retries the mutation or falls back to another backend.
 #[allow(clippy::too_many_arguments)]
 #[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
