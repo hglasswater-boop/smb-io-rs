@@ -52,6 +52,8 @@ jobs:
             SO="dist/jniLibs/$ABI/libsmb_io_android.so"
             test -f "$SO"
             "$LLVM_NM" -D "$SO" | grep -q 'Java_app_local1st_files_core_fs_rust_RustSmbNative_nativeMkdir'
+            "$LLVM_NM" -D "$SO" | grep -q 'Java_app_local1st_files_core_fs_rust_RustSmbNative_nativeRename'
+            "$LLVM_NM" -D "$SO" | grep -q 'Java_app_local1st_files_core_fs_rust_RustSmbNative_nativeDeleteFile'
             "$LLVM_NM" -D "$SO" | grep -q 'Java_app_local1st_files_core_fs_rust_RustSmbNative_nativePrefetch'
           done
 
