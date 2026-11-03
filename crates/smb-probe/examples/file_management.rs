@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let created = session
         .open_file(&tree, &empty, FileOpenOptions::read_existing_random())
         .await?;
-    if created.len() != 0 {
+    if !created.is_empty() {
         return Err("FILE_CREATE did not produce a zero-length file".into());
     }
     session.close_file(created, CloseOptions::default()).await?;
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let original = session
         .open_file(&tree, &empty, FileOpenOptions::read_existing_random())
         .await?;
-    if original.len() != 0 {
+    if !original.is_empty() {
         return Err("colliding FILE_CREATE modified existing file".into());
     }
     session
