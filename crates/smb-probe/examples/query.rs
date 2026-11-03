@@ -7,7 +7,7 @@ use smb_io_client::{
     CloseOptions, Connection, FileOpenOptions, NegotiateConfig, SessionConnection,
     SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
 };
-use smb_io_fs::{query_standard_information, read_directory_names};
+use smb_io_fs::{query_standard_information, read_directory_metadata, read_directory_names};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -84,6 +84,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("query_directory_verified: true");
     session
         .close_file(directory, CloseOptions::default())
+        .await?;
+
+    // A fresh handle avoids assuming QUERY_DIRECTORY resets its cursor after EOF.
+    let metadata_directory = session
+        .open_file(&tree, "", FileOpenOptions::read_existing_directory())
+        .await?;
+    let metadata = read_directory_metadata(&mut session, &metadata_directory).await?;
+    let fixture = metadata
+        .iter()
+        .find(|entry| entry.name == expected_name)
+        .ok_or("metadata enumeration did not return the fixture file")?;
+    if fixture.end_of_file != standard.end_of_file {
+        return Err(format!(
+            "directory metadata EndOfFile mismatch: QUERY_INFO={}, QUERY_DIRECTORY={}",
+            standard.end_of_file, fixture.end_of_file
+        )
+        .into());
+    }
+    if fixture.file_attributes & 0x10 != 0 {
+        return Err("directory metadata incorrectly marks the fixture file as a directory".into());
+    }
+    println!("directory_metadata_verified: true");
+    session
+        .close_file(metadata_directory, CloseOptions::default())
         .await?;
 
     Ok(())
