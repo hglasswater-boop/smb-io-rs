@@ -91,6 +91,18 @@ pub struct DirectoryNameEntry {
     pub name: String,
 }
 
+/// Full FileIdFullDirectoryInformation metadata. Timestamps are raw Windows FILETIME.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryMetadataEntry {
+    pub file_index: u32,
+    pub name: String,
+    pub creation_time: u64,
+    pub last_write_time: u64,
+    pub end_of_file: u64,
+    pub allocation_size: u64,
+    pub file_attributes: u32,
+}
+
 pub fn decode_file_names_information(
     buffer: &[u8],
 ) -> Result<Vec<DirectoryNameEntry>, FsQueryError> {
@@ -155,9 +167,22 @@ pub fn decode_file_names_information(
     Ok(entries)
 }
 
+/// Existing name-only interface, retained for Rust clients using Phase 6.
 pub fn decode_file_id_full_directory_information(
     buffer: &[u8],
 ) -> Result<Vec<DirectoryNameEntry>, FsQueryError> {
+    Ok(decode_file_id_full_directory_metadata(buffer)?
+        .into_iter()
+        .map(|entry| DirectoryNameEntry {
+            file_index: entry.file_index,
+            name: entry.name,
+        })
+        .collect())
+}
+
+pub fn decode_file_id_full_directory_metadata(
+    buffer: &[u8],
+) -> Result<Vec<DirectoryMetadataEntry>, FsQueryError> {
     let mut entries = Vec::new();
     let mut offset = 0usize;
 
@@ -172,6 +197,18 @@ pub fn decode_file_id_full_directory_information(
         let next_entry_offset =
             u32::from_le_bytes(remaining[0..4].try_into().expect("fixed range")) as usize;
         let file_index = u32::from_le_bytes(remaining[4..8].try_into().expect("fixed range"));
+        let creation_time = u64::from_le_bytes(remaining[8..16].try_into().expect("fixed range"));
+        let last_write_time =
+            u64::from_le_bytes(remaining[24..32].try_into().expect("fixed range"));
+        let end_of_file = i64::from_le_bytes(remaining[40..48].try_into().expect("fixed range"));
+        let allocation_size = i64::from_le_bytes(remaining[48..56].try_into().expect("fixed range"));
+        if end_of_file < 0 || allocation_size < 0 {
+            return Err(FsQueryError::InvalidData(
+                "FileIdFullDirectoryInformation has negative file size or allocation",
+            ));
+        }
+        let file_attributes =
+            u32::from_le_bytes(remaining[56..60].try_into().expect("fixed range"));
         let file_name_length = u32::from_le_bytes(
             remaining[FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET
                 ..FILE_ID_FULL_DIRECTORY_INFORMATION_NAME_LENGTH_OFFSET + 4]
@@ -202,7 +239,15 @@ pub fn decode_file_id_full_directory_information(
             units.push(u16::from_le_bytes([pair[0], pair[1]]));
         }
         let name = String::from_utf16(&units).map_err(|_| FsQueryError::InvalidUtf16)?;
-        entries.push(DirectoryNameEntry { file_index, name });
+        entries.push(DirectoryMetadataEntry {
+            file_index,
+            name,
+            creation_time,
+            last_write_time,
+            end_of_file: end_of_file as u64,
+            allocation_size: allocation_size as u64,
+            file_attributes,
+        });
 
         if next_entry_offset == 0 {
             break;
@@ -262,6 +307,35 @@ pub async fn read_directory_names_matching<T>(
 where
     T: Transport,
 {
+    Ok(read_directory_metadata_matching(session, directory, pattern)
+        .await?
+        .into_iter()
+        .map(|entry| DirectoryNameEntry {
+            file_index: entry.file_index,
+            name: entry.name,
+        })
+        .collect())
+}
+
+/// Paged, signed QUERY_DIRECTORY with size, timestamps, and attribute bits.
+pub async fn read_directory_metadata<T>(
+    session: &mut SessionConnection<T>,
+    directory: &FileHandle,
+) -> Result<Vec<DirectoryMetadataEntry>, FsQueryError>
+where
+    T: Transport,
+{
+    read_directory_metadata_matching(session, directory, "*").await
+}
+
+pub async fn read_directory_metadata_matching<T>(
+    session: &mut SessionConnection<T>,
+    directory: &FileHandle,
+    pattern: &str,
+) -> Result<Vec<DirectoryMetadataEntry>, FsQueryError>
+where
+    T: Transport,
+{
     if pattern.is_empty() {
         return Err(FsQueryError::InvalidData(
             "directory search pattern must not be empty",
@@ -270,8 +344,6 @@ where
 
     let mut entries = Vec::new();
     loop {
-        // Samba expects the search pattern to remain present on continuation requests.
-        // With RESTART_SCANS clear, the server still advances its directory cursor.
         let options = QueryDirectoryOptions::new(
             FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
             pattern,
@@ -281,7 +353,7 @@ where
         if buffer.is_empty() {
             break;
         }
-        entries.extend(decode_file_id_full_directory_information(&buffer)?);
+        entries.extend(decode_file_id_full_directory_metadata(&buffer)?);
     }
     Ok(entries)
 }
