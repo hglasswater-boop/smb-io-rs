@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn mkdir_contract_rejects_unsafe_paths_before_connect() {
-        for path in ["", "/absolute", "\\absolute", "../escape", "./name", "parent/../name", "dir\\..\\name", "bad\u0000name"] {
+        for path in ["", "/absolute", r"\absolute", "../escape", "./name", "parent/../name", r"dir\..\name", "bad\0name"] {
             let request = SmbMutationRequest::new("nas.local", "media", path, "user", "password");
             assert!(validate_mkdir_request(&request).is_err(), "accepted invalid path: {path:?}");
         }
@@ -507,5 +507,4 @@ mod tests {
         request.share = "media/other".to_string();
         assert!(validate_mkdir_request(&request).is_err());
     }
-
 }
