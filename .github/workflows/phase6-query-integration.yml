@@ -112,66 +112,9 @@ jobs:
           cargo run -p smb-io-android --example directory_pages -- \
             127.0.0.1 "$SMB_PORT" auth - "$SMB_USER" "$SMB_PASSWORD" \
             2>&1 | tee /tmp/phase6-directory-pages.log
-          grep -q '^directory_pages_verified: true
-
-
-      - name: Collect diagnostics
-        if: always()
-        run: |
-          mkdir -p /tmp/phase6-diagnostics
-          cp /tmp/phase6-query.log /tmp/phase6-diagnostics/phase6-query.log 2>/dev/null || true
-          sudo cp /tmp/smb-phase6.log /tmp/phase6-diagnostics/smb-phase6.log 2>/dev/null || true
-          sudo chown -R "$(id -u):$(id -g)" /tmp/phase6-diagnostics
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          retention-days: 7
-          name: phase6-query-diagnostics
-          path: /tmp/phase6-diagnostics
-          if-no-files-found: warn
- /tmp/phase6-directory-pages.log
-          grep -q '^filesystem_capacity_verified: true
-
-
-      - name: Collect diagnostics
-        if: always()
-        run: |
-          mkdir -p /tmp/phase6-diagnostics
-          cp /tmp/phase6-query.log /tmp/phase6-diagnostics/phase6-query.log 2>/dev/null || true
-          sudo cp /tmp/smb-phase6.log /tmp/phase6-diagnostics/smb-phase6.log 2>/dev/null || true
-          sudo chown -R "$(id -u):$(id -g)" /tmp/phase6-diagnostics
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          retention-days: 7
-          name: phase6-query-diagnostics
-          path: /tmp/phase6-diagnostics
-          if-no-files-found: warn
- /tmp/phase6-directory-pages.log
-          grep -q '^directory_size_verified: true
-
-
-      - name: Collect diagnostics
-        if: always()
-        run: |
-          mkdir -p /tmp/phase6-diagnostics
-          cp /tmp/phase6-query.log /tmp/phase6-diagnostics/phase6-query.log 2>/dev/null || true
-          sudo cp /tmp/smb-phase6.log /tmp/phase6-diagnostics/smb-phase6.log 2>/dev/null || true
-          sudo chown -R "$(id -u):$(id -g)" /tmp/phase6-diagnostics
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          retention-days: 7
-          name: phase6-query-diagnostics
-          path: /tmp/phase6-diagnostics
-          if-no-files-found: warn
- /tmp/phase6-directory-pages.log
+          grep -q '^directory_pages_verified: true$' /tmp/phase6-directory-pages.log
+          grep -q '^filesystem_capacity_verified: true$' /tmp/phase6-directory-pages.log
+          grep -q '^directory_size_verified: true$' /tmp/phase6-directory-pages.log
 
 
       - name: Collect diagnostics
