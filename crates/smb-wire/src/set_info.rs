@@ -15,6 +15,7 @@ const RENAME_INFORMATION_MIN_SIZE: usize = 24;
 
 pub mod set_info_class {
     pub const FILE_RENAME_INFORMATION: u8 = 10;
+    pub const FILE_END_OF_FILE_INFORMATION: u8 = 20;
     pub const FILE_DISPOSITION_INFORMATION: u8 = 13;
     pub const FILE_DISPOSITION_INFORMATION_EX: u8 = 64;
     pub const FILE_RENAME_INFORMATION_EX: u8 = 65;
@@ -255,6 +256,27 @@ impl FileDispositionInformationEx {
 
     pub fn encode(self) -> Vec<u8> {
         self.flags.to_le_bytes().to_vec()
+    }
+}
+
+/// Eight-byte signed little-endian logical EOF length (MS-FSCC).
+///
+/// SMB rejects negative lengths. Keep this wire structure separate from the file's
+/// allocation size; SET_INFO must not silently translate it to another information class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileEndOfFileInformation {
+    end_of_file: i64,
+}
+
+impl FileEndOfFileInformation {
+    pub fn new(length: u64) -> Result<Self, WireError> {
+        let end_of_file = i64::try_from(length)
+            .map_err(|_| WireError::InvalidField("FileEndOfFileInformation EndOfFile"))?;
+        Ok(Self { end_of_file })
+    }
+
+    pub fn encode(self) -> [u8; 8] {
+        self.end_of_file.to_le_bytes()
     }
 }
 

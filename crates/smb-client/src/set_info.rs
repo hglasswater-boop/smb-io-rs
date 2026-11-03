@@ -32,6 +32,26 @@ impl<T> SessionConnection<T>
 where
     T: Transport,
 {
+    /// Resize an already-open regular file without changing its open disposition or retrying
+    /// an ambiguous SET_INFO. The FILE_END_OF_FILE_INFORMATION payload is a signed 64-bit EOF.
+    pub async fn set_end_of_file(
+        &mut self,
+        file: &FileHandle,
+        length: u64,
+    ) -> Result<(), ClientError> {
+        let payload = smb_io_wire::FileEndOfFileInformation::new(length)?
+            .encode()
+            .to_vec();
+        self.set_info(
+            file,
+            SetInfoOptions::file(
+                smb_io_wire::set_info_class::FILE_END_OF_FILE_INFORMATION,
+                payload,
+            ),
+        )
+        .await
+    }
+
     /// Applies one SMB2 SET_INFO mutation to an already-open handle.
     ///
     /// The request is sent exactly once. Transport failure after send is returned to the caller
@@ -200,6 +220,17 @@ mod tests {
     #[test]
     fn legacy_set_info_uses_zero_credit_charge() {
         assert_eq!(set_info_credit_charge(false, 64 * 1024).unwrap(), 0);
+    }
+
+    #[test]
+    fn eof_resize_payload_rejects_above_i64_max_before_network() {
+        assert!(smb_io_wire::FileEndOfFileInformation::new(i64::MAX as u64 + 1).is_err());
+        assert_eq!(
+            smb_io_wire::FileEndOfFileInformation::new(4)
+                .unwrap()
+                .encode(),
+            4i64.to_le_bytes()
+        );
     }
 
     #[test]
