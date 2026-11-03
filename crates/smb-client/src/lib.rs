@@ -14,6 +14,7 @@ mod credits;
 mod durable_open;
 mod error;
 mod file;
+mod flush;
 mod message_id;
 mod mutation_open;
 mod negotiate;
