@@ -836,7 +836,7 @@ mod tests {
             let request = SmbMutationRequest::new("no-such-host.invalid", "files", path, "", "");
             assert!(
                 matches!(
-                    engine.list_directory(request),
+                    engine.open_directory(request),
                     Err(AndroidBridgeError::InvalidConfig(_))
                 ),
                 "accepted unsafe directory path: {path:?}"
@@ -877,12 +877,39 @@ mod tests {
     }
 
     #[test]
+    fn directory_cursor_handle_contract_is_independent_from_video_handles() {
+        // A live directory session keeps its SMB cursor across repeated read calls.
+        // The native API no longer returns one giant ByteArray for a whole folder.
+        let _open: fn(&AndroidEngine, SmbMutationRequest) -> Result<DirectoryHandle, AndroidBridgeError> =
+            AndroidEngine::open_directory;
+        let _next: fn(&AndroidEngine, DirectoryHandle) -> Result<Vec<u8>, AndroidBridgeError> =
+            AndroidEngine::read_directory_page;
+        let _close: fn(&AndroidEngine, DirectoryHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::close_directory;
+    }
+
+    #[test]
+    fn directory_eof_page_is_distinct_from_any_nonempty_data_page() {
+        assert_eq!(encode_directory_metadata(&[]).unwrap(), b"XFL1\0\0\0\0");
+        let entry = smb_io_fs::DirectoryMetadataEntry {
+            file_index: 0,
+            name: "item".to_owned(),
+            file_attributes: 0,
+            end_of_file: 0,
+            allocation_size: 0,
+            creation_time: 0,
+            last_write_time: 0,
+        };
+        assert_ne!(encode_directory_metadata(&[entry]).unwrap(), b"XFL1\0\0\0\0");
+    }
+
+    #[test]
     fn directory_binary_contract_reports_empty_directory_with_header() {
         assert_eq!(encode_directory_metadata(&[]).unwrap(), b"XFL1\0\0\0\0");
     }
 
     #[test]
-    fn directory_binary_contract_rejects_over_maximum_size() {
+    fn directory_binary_contract_rejects_oversized_single_page() {
         let entry = smb_io_fs::DirectoryMetadataEntry {
             file_index: 0,
             name: "a".repeat(MAX_DIRECTORY_RESULT_BYTES),
