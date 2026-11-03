@@ -43,3 +43,15 @@ The next Android API exposes the already-tested Phase 9 primitives, without chan
 - Do not expose `delete_directory` as a replacement for `XFileSystem.delete`: Rust Phase 9 deletes **only empty directories**, while XFiles currently deletes directories recursively.
 
 XFiles #239, #246 and smb-io-rs #35 remain Open after PR merging until verification is complete.
+
+## Read-only directory metadata JNI v5 (Issue #39)
+
+The new `nativeListDirectory` reads directory entries via signed `QUERY_DIRECTORY(FileIdFullDirectoryInformation)`, preserving Phase 6 pagination and the full decoder merged in PR #38. One operation establishes a signed/authenticated session, TREE_CONNECT, opens the target directory, enumerates it and closes the handle; no filesystem mutation is performed.
+
+- Inputs: host, port, share, **share-relative directory path** (an empty path is allowed for the share root), username, password, domain and workstation. Host/share/port and path are validated **before TCP**; absolute, NUL and dot/parent path components are disallowed. Anonymous sessions ignore supplied credentials, and the Kotlin caller sends an empty password.
+- Result: a Java `byte[]` using the bounded binary **XFL1** format. Every number is little-endian. The first 4 bytes are ASCII `XFL1`, followed by a u32 entry count. For each entry: u32 UTF-8 name length, exact name bytes (no escaping or delimiter), u32 raw SMB file-attribute mask, u64 nonnegative file length (`EndOfFile`), u64 creation FILETIME, u64 last-write FILETIME. No values are silently fabricated. The name is exactly the decoded SMB name, including Unicode.
+- The entire encoded result is capped at **16 MiB**; exceeding it fails with IOException instead of returning an incomplete list. All checked lengths/counts must fit the buffer and the JVM array limit. The Kotlin decoder must reject truncated, trailing, invalid version, or nonsensical data and convert raw Windows FILETIME (100ns since 1601 UTC) to milliseconds with checked arithmetic.
+- The Rust JNI generation advances from **4** to **5** in the same XFiles pin/expected-version update. JNI generation 5 preserves v4 video, mkdir, rename and deleteFile methods.
+- Rust CI, Phase 6 signed Samba, and Android JNI all three ABI exported symbol checks must pass. XFiles #244 separately gates `SmbFileSystem.list` routing, basePath, dot-directory filtering, hidden/reparse attribute mapping, Unicode/timestamps/size, VPN preparation, Mobile/TV CI and NAS parity.
+- In `auto`, read-only list may use SMBJ **only if JNI is missing/incompatible before the call**, to prevent hiding real Rust failures. Explicit `rust` is strict. Explicit `smbj` never loads Rust. `stat` continues to call `list(parent)`, retaining its semantics without a separate native method.
+- This is not complete filesystem parity. `storageSpace`, `directorySize`, file creation, write, recursive delete and transfers remain separate tasks. Keep #39 / XFiles #244 / umbrella #239 Open through real-device verification.
