@@ -15,7 +15,7 @@ use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
 use crate::{
     API_VERSION, AndroidEngine, AndroidEngineConfig, DirectoryHandle, SmbMutationRequest,
-    VideoHandle, VideoOpenRequest,
+    VideoHandle, VideoOpenRequest, WritableHandle,
 };
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
@@ -248,6 +248,154 @@ pub fn native_close_directory<'local>(
                 Err(error) => return throw_io(env, error),
             };
             match engine.close_directory(DirectoryHandle::from_raw(handle as u64)) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Open a writable stream (OVERWRITE_IF) on one authenticated signed SMB session.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_open_writable<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    path: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) -> jlong {
+    unowned_env
+        .with_env(|env| -> JniResult<jlong> {
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(0);
+            };
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.open_writable(request) {
+                Ok(handle) => Ok(handle.raw() as jlong),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// One bounded, non-replayed JNI positional WRITE from a Java ByteArray.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_write_at<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    position: jlong,
+    source: JByteArray<'local>,
+    source_offset: jint,
+    length: jint,
+) -> jint {
+    unowned_env
+        .with_env(|env| -> JniResult<jint> {
+            if handle <= 0 {
+                return throw_argument(env, "writable SMB handle must be positive");
+            }
+            if position < 0 {
+                return throw_argument(env, "SMB write position must be nonnegative");
+            }
+            if source_offset < 0 || length < 0 {
+                return throw_argument(env, "SMB write source range must be nonnegative");
+            }
+            if length as usize > 1024 * 1024 {
+                return throw_argument(env, "SMB JNI write chunk exceeds 1 MiB");
+            }
+            let array_len = source.len(env)?;
+            let Some(end) = (source_offset as usize).checked_add(length as usize) else {
+                return throw_argument(env, "SMB write array range overflow");
+            };
+            if end > array_len {
+                return throw_argument(env, "SMB write range exceeds source array");
+            }
+
+            let mut source_bytes = vec![0i8; length as usize];
+            if length > 0 {
+                source.get_region(env, source_offset, &mut source_bytes)?;
+            }
+            let bytes: Vec<u8> = source_bytes.into_iter().map(|byte| byte as u8).collect();
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.write_writable_at(
+                WritableHandle::from_raw(handle as u64),
+                position as u64,
+                &bytes,
+            ) {
+                Ok(count) => match jint::try_from(count) {
+                    Ok(count) => Ok(count),
+                    Err(_) => throw_io(env, "SMB native write count exceeds Java Int"),
+                },
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Explicit SMB2 FLUSH. A failed or poisoned handle must never return success.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_flush_writable<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            if handle <= 0 {
+                return throw_argument(env, "writable SMB handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.flush_writable(WritableHandle::from_raw(handle as u64)) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Remove the writable handle then close it even if a previous WRITE failed.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_close_writable<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            if handle <= 0 {
+                return throw_argument(env, "writable SMB handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.close_writable(WritableHandle::from_raw(handle as u64)) {
                 Ok(()) => Ok(()),
                 Err(error) => throw_io(env, error),
             }
