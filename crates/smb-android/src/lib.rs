@@ -12,4 +12,4 @@ pub use engine::{
 };
 
 /// Android bridge API generation for video, mutations and read-only directory metadata.
-pub const API_VERSION: u32 = 5;
+pub const API_VERSION: u32 = 6;
