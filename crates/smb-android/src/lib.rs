@@ -7,8 +7,8 @@ mod engine;
 mod jni;
 
 pub use engine::{
-    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest,
+    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest, SmbMutationRequest,
 };
 
-/// Android bridge API generation that includes the non-blocking video prefetch entry point.
-pub const API_VERSION: u32 = 2;
+/// Android bridge API generation that adds one-shot non-retrying mkdir to the video API.
+pub const API_VERSION: u32 = 3;
