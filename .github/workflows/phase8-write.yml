@@ -82,6 +82,18 @@ jobs:
           grep -q '^write_flush_verified: true$' /tmp/phase8-write.log
           grep -q '^write_roundtrip_verified: true$' /tmp/phase8-write.log
 
+      - name: Verify persistent writable JNI engine with mandatory signed Samba
+        run: |
+          set -o pipefail
+          sudo -u "$SMB_USER" dd if=/dev/zero of=/tmp/smb-phase8-write/writable-jni.bin bs=1048576 count=5 status=none
+          cargo run -p smb-io-android --example writable_stream -- \
+            127.0.0.1 "$SMB_PORT" auth writable-jni.bin "$SMB_USER" "$SMB_PASSWORD" \
+            2>&1 | tee /tmp/phase8-writable-jni.log
+          grep -q '^writable_stream_flush_verified: true$' /tmp/phase8-writable-jni.log
+          grep -q '^writable_stream_overwrite_verified: true$' /tmp/phase8-writable-jni.log
+          grep -q '^writable_stream_readback_verified: true$' /tmp/phase8-writable-jni.log
+          grep -q '^writable_stream_closed_handle_verified: true$' /tmp/phase8-writable-jni.log
+
       - name: Show diagnostics on failure
         if: failure()
         run: |
