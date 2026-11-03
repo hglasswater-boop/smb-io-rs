@@ -56,3 +56,15 @@ The native API is **cursor-based**, not a one-shot all-files byte array. An indi
 - JNI generation **v5** preserves the v4 video/mutation entries. All three new JNI symbols must be verified on three Android ABIs. XFiles updates its pinned Rust engine SHA and expected version atomically, with tests for pagination, EOF, and native handle cleanup.
 - Rust CI + signed Samba/Phase 6/query continuation and Android JNI CI gate this Rust PR. XFiles #244 separately tracks `list` mapping, `stat` via parent listing, timestamps, reparse/hidden/dir handling, WireGuard and NAS parity.
 - `auto` can use SMBJ only when native incompatibility is detected **before** opening Rust; actual Rust network/query failures are errors, not silent fallbacks. `smbj` never invokes JNI. Keep #39 / #244 / parent #239 Open pending verification.
+
+## Non-overwriting file creation JNI v6 (Issue #41)
+
+This small slice implements the XFiles `SmbFileSystem.createFile` contract only. It must not change `openOut` (OVERWRITE_IF), positional writes, flush, truncate, file deletion, or recursive operations.
+
+- `smb_io_fs::create_file` performs exactly one SMB2 CREATE with disposition `FILE_CREATE` (fail if any file/directory already exists), `NON_DIRECTORY_FILE`, then CLOSE. It creates a zero-length regular file. A server name collision is returned as `FsMutationError::AlreadyExists`, **never overwrites or truncates existing content**.
+- `FileOpenOptions::create_new_random()` centralizes `create_disposition::CREATE` using the existing writable non-directory flags and signed CREATE behavior. It must not accidentally select `OVERWRITE_IF` or `OPEN_IF`.
+- `nativeCreateFile(host, port, share, path, username, password, domain, workstation)` is a one-shot JNI method. JNI API generation advances **5→6** while preserving existing JNI functions. Validate share-relative nonempty paths and credentials before network; XFiles sends the saved `basePath` and prepares Wi-Fi/WireGuard before invoking Rust.
+- Never retry CREATE after an ambiguous disconnect, and never switch to SMBJ after native CREATE has started. `auto` may choose SMBJ only if native JNI is missing/incompatible at the pre-call check. `rust` is strict, `smbj` never loads JNI.
+- XFiles #245 will add the matching Kotlin adapter and tests, update engine pin/API together, and retain existing SMBJ stat fallback behavior after a successful creation. Real NAS and WireGuard verification remain required.
+- Prove CREATE collision with mandatory-signing Samba: create a new empty Unicode file, attempt the same CREATE again, check `AlreadyExists` and zero size, plus negative/absolute/dot path tests. Rust CI/Android JNI (3 ABIs)/Samba/Phase 9 gates precede Rust main merge.
+- `openOut`, `write_at`, `setLength`, `flush`, copying, and `SmbRandomAccessOutputFile` remain separate substeps under XFiles #245. **Do not claim complete write migration.** Preserve Rust #41 and XFiles #245/#239 Open through device parity checks.
