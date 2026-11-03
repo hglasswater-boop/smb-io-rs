@@ -94,6 +94,7 @@ pub enum AndroidBridgeError {
     InvalidHandle(VideoHandle),
     InvalidConfig(&'static str),
     ReadTooLarge { requested: usize, maximum: usize },
+    WriteTooLarge { requested: usize, maximum: usize },
     InternalState(&'static str),
     RandomSource,
 }
@@ -114,6 +115,10 @@ impl fmt::Display for AndroidBridgeError {
                 f,
                 "Android SMB read request is too large: requested {requested} bytes, maximum {maximum}"
             ),
+            Self::WriteTooLarge { requested, maximum } => write!(
+                f,
+                "Android SMB write request is too large: requested {requested} bytes, maximum {maximum}"
+            ),
             Self::InternalState(message) => {
                 write!(f, "Android SMB internal state error: {message}")
             }
@@ -133,6 +138,7 @@ impl Error for AndroidBridgeError {
             Self::InvalidHandle(_)
             | Self::InvalidConfig(_)
             | Self::ReadTooLarge { .. }
+            | Self::WriteTooLarge { .. }
             | Self::InternalState(_)
             | Self::RandomSource => None,
         }
@@ -305,6 +311,40 @@ struct DirectorySession {
     exhausted: bool,
 }
 
+/// Writable streams use positive JNI handles with a separate bit from directory and video IDs.
+const WRITABLE_HANDLE_FLAG: u64 = 1u64 << 61;
+const MAX_JNI_WRITE_BYTES: usize = 1024 * 1024;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WritableHandle(u64);
+
+impl WritableHandle {
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    fn table_key(self) -> Result<VideoHandle, AndroidBridgeError> {
+        if self.0 & WRITABLE_HANDLE_FLAG == 0
+            || self.0 & DIRECTORY_HANDLE_FLAG != 0
+            || self.0 == WRITABLE_HANDLE_FLAG
+        {
+            return Err(AndroidBridgeError::InvalidConfig("invalid writable handle"));
+        }
+        Ok(VideoHandle::from_raw(self.0 & !WRITABLE_HANDLE_FLAG))
+    }
+}
+
+struct WritableSession {
+    session: SessionConnection<TcpTransport>,
+    file: FileHandle,
+    poisoned: bool,
+}
+
 /// Long-lived runtime and opaque-handle owner for the Android/JNI adapter.
 ///
 /// JNI functions remain mechanical wrappers around this type. SMB lifecycle, reconnect,
@@ -314,6 +354,7 @@ pub struct AndroidEngine {
     runtime: Runtime,
     videos: HandleTable<VideoSession>,
     directories: HandleTable<Mutex<DirectorySession>>,
+    writers: HandleTable<Mutex<WritableSession>>,
     max_read_bytes: usize,
     reconnect_policy: ReadReconnectPolicy,
 }
@@ -340,6 +381,7 @@ impl AndroidEngine {
             runtime,
             videos: HandleTable::new(),
             directories: HandleTable::new(),
+            writers: HandleTable::new(),
             max_read_bytes: config.max_read_bytes,
             reconnect_policy: ReadReconnectPolicy {
                 max_connect_attempts: config.read_reconnect_attempts,
@@ -554,6 +596,98 @@ impl AndroidEngine {
         let directory = state.directory.clone();
         self.runtime
             .block_on(state.session.close_file(directory, CloseOptions::default()))
+            .map(|_| ())
+            .map_err(AndroidBridgeError::from)
+    }
+
+    /// Open one writable SMB file with OVERWRITE_IF; no automatic retry after CREATE.
+    pub fn open_writable(
+        &self,
+        request: SmbMutationRequest,
+    ) -> Result<WritableHandle, AndroidBridgeError> {
+        validate_mutation_request(&request)?;
+        let writer = self.runtime.block_on(async move {
+            let (mut session, tree, path) = connect_share(request).await?;
+            let file = session
+                .open_file(&tree, path, FileOpenOptions::overwrite_for_stream())
+                .await?;
+            Ok::<_, AndroidBridgeError>(WritableSession {
+                session,
+                file,
+                poisoned: false,
+            })
+        })?;
+        let id = self.writers.insert(Mutex::new(writer))?;
+        Ok(WritableHandle(id.raw() | WRITABLE_HANDLE_FLAG))
+    }
+
+    /// Write one bounded JNI chunk, never retrying ambiguous transport failures.
+    pub fn write_writable_at(
+        &self,
+        handle: WritableHandle,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, AndroidBridgeError> {
+        if data.len() > MAX_JNI_WRITE_BYTES {
+            return Err(AndroidBridgeError::WriteTooLarge {
+                requested: data.len(),
+                maximum: MAX_JNI_WRITE_BYTES,
+            });
+        }
+        let entry = self.writers.get(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        if state.poisoned {
+            return Err(AndroidBridgeError::InternalState(
+                "writable SMB handle cannot be used after a failed operation",
+            ));
+        }
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let WritableSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
+        match self.runtime.block_on(session.write_at(file, offset, data)) {
+            Ok(count) => Ok(count),
+            Err(error) => {
+                *poisoned = true;
+                Err(AndroidBridgeError::from(error))
+            }
+        }
+    }
+
+    /// Flush the same signed writable SMB file; failures poison further writes.
+    pub fn flush_writable(&self, handle: WritableHandle) -> Result<(), AndroidBridgeError> {
+        let entry = self.writers.get(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        if state.poisoned {
+            return Err(AndroidBridgeError::InternalState(
+                "writable SMB handle cannot be flushed after failure",
+            ));
+        }
+        let WritableSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
+        match self.runtime.block_on(session.flush_file(file)) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *poisoned = true;
+                Err(AndroidBridgeError::from(error))
+            }
+        }
+    }
+
+    /// Always remove the local writable handle before the network CLOSE attempt.
+    pub fn close_writable(&self, handle: WritableHandle) -> Result<(), AndroidBridgeError> {
+        let entry = self.writers.remove(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        let file = state.file.clone();
+        self.runtime
+            .block_on(state.session.close_file(file, CloseOptions::default()))
             .map(|_| ())
             .map_err(AndroidBridgeError::from)
     }
@@ -841,8 +975,8 @@ mod tests {
         assert!(validate_open_request(&request).is_ok());
     }
     #[test]
-    fn mkdir_contract_requires_new_jni_generation() {
-        assert_eq!(crate::API_VERSION, 6);
+    fn legacy_mutation_contract_is_retained_in_jni_v7() {
+        assert_eq!(crate::API_VERSION, 7);
     }
 
     #[test]
@@ -1051,6 +1185,70 @@ mod tests {
     #[test]
     fn directory_binary_contract_reports_empty_directory_with_header() {
         assert_eq!(encode_directory_metadata(&[]).unwrap(), b"XFL1\0\0\0\0");
+    }
+
+    #[test]
+    fn writable_handles_are_separate_from_video_and_directory_handles() {
+        let valid = WritableHandle::from_raw(WRITABLE_HANDLE_FLAG | 1);
+        assert_eq!(valid.table_key().unwrap().raw(), 1);
+        assert!(WritableHandle::from_raw(1).table_key().is_err());
+        assert!(
+            WritableHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1)
+                .table_key()
+                .is_err()
+        );
+        assert!(DirectoryHandle::from_raw(valid.raw()).table_key().is_err());
+    }
+
+    #[test]
+    fn writable_open_rejects_unsafe_paths_before_network() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in [
+            "",
+            "../escape",
+            "/absolute",
+            r"\absolute",
+            "./dot",
+            "nul\0name",
+        ] {
+            let request = SmbMutationRequest::new("no-such-host.invalid", "share", path, "", "");
+            assert!(
+                matches!(
+                    engine.open_writable(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "accepted invalid writable path: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_jni_write_is_rejected_before_touching_any_handle() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        let handle = WritableHandle::from_raw(WRITABLE_HANDLE_FLAG | 1);
+        assert!(matches!(
+            engine.write_writable_at(handle, 0, &vec![1; MAX_JNI_WRITE_BYTES + 1]),
+            Err(AndroidBridgeError::WriteTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn writable_native_api_contract_is_open_write_flush_close() {
+        let _open: fn(
+            &AndroidEngine,
+            SmbMutationRequest,
+        ) -> Result<WritableHandle, AndroidBridgeError> = AndroidEngine::open_writable;
+        let _write: fn(
+            &AndroidEngine,
+            WritableHandle,
+            u64,
+            &[u8],
+        ) -> Result<usize, AndroidBridgeError> = AndroidEngine::write_writable_at;
+        let _flush: fn(&AndroidEngine, WritableHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::flush_writable;
+        let _close: fn(&AndroidEngine, WritableHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::close_writable;
+        assert_eq!(crate::API_VERSION, 7);
     }
 
     #[test]
