@@ -17,6 +17,16 @@ impl FileOpenOptions {
         Self::writable_random(create_disposition::OPEN)
     }
 
+    /// Opens a non-directory WRITE-only output stream with OVERWRITE_IF semantics.
+    ///
+    /// Unlike random read/write handles, this does not request GENERIC_READ. Some writable SMB
+    /// shares deliberately deny reading, so openOut must not require read access.
+    pub const fn overwrite_for_stream() -> Self {
+        let mut options = Self::writable_random(create_disposition::OVERWRITE_IF);
+        options.desired_access = desired_access::GENERIC_WRITE;
+        options
+    }
+
     /// Opens or creates a non-directory file and truncates existing content.
     pub const fn create_or_truncate_random() -> Self {
         Self::writable_random(create_disposition::OVERWRITE_IF)
