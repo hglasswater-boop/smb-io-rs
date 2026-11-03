@@ -8,12 +8,12 @@ use std::time::Duration;
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
     ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig,
-    QueryDirectoryOptions, ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError,
+    QueryDirectoryOptions, QueryInfoOptions, ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError,
     SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
     TreeHandle,
 };
 use smb_io_fs::{
-    DirectoryMetadataEntry, FsMutationError, FsQueryError, decode_file_id_full_directory_metadata,
+    DirectoryMetadataEntry, FileFsFullSizeInformation, FsMutationError, FsQueryError, decode_file_id_full_directory_metadata,
 };
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
@@ -308,6 +308,8 @@ impl DirectoryHandle {
 struct DirectorySession {
     session: SessionConnection<TcpTransport>,
     directory: FileHandle,
+    tree: TreeHandle,
+    root_path: String,
     exhausted: bool,
 }
 
@@ -595,6 +597,8 @@ impl AndroidEngine {
             Ok::<_, AndroidBridgeError>(DirectorySession {
                 session,
                 directory,
+                tree,
+                root_path: path,
                 exhausted: false,
             })
         })?;
@@ -617,6 +621,7 @@ impl AndroidEngine {
             session,
             directory,
             exhausted,
+            ..
         } = &mut *state;
         let options = QueryDirectoryOptions::new(
             FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
@@ -632,6 +637,61 @@ impl AndroidEngine {
         }
         let entries = decode_file_id_full_directory_metadata(&buffer)?;
         encode_directory_metadata(&entries)
+    }
+
+    /// Query a signed filesystem info response on the already-authenticated directory session.
+    /// FileFsFullSizeInformation reports caller-available (quota-aware) free bytes.
+    pub fn directory_capacity(
+        &self,
+        handle: DirectoryHandle,
+    ) -> Result<Vec<u8>, AndroidBridgeError> {
+        let entry = self.directories.get(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        let DirectorySession { session, directory, .. } = &mut *state;
+        let raw = self.runtime.block_on(session.query_info(
+            directory,
+            QueryInfoOptions::filesystem(0x07, 32),
+        ))?;
+        let info = FileFsFullSizeInformation::decode(&raw)?;
+        let (total, caller_free) = info.capacity_bytes();
+        Ok(encode_capacity_bytes(total, caller_free))
+    }
+
+    /// Sum file EOF lengths without following junctions. Uses one authenticated SMB session,
+    /// opens/closes each child directory explicitly, and never materializes a whole tree.
+    pub fn directory_size(&self, handle: DirectoryHandle) -> Result<i64, AndroidBridgeError> {
+        let entry = self.directories.get(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        let DirectorySession { session, tree, root_path, .. } = &mut *state;
+        self.runtime.block_on(async {
+            let mut pending = vec![root_path.clone()];
+            let mut total = 0u64;
+            while let Some(path) = pending.pop() {
+                let directory = session
+                    .open_file(tree, &path, FileOpenOptions::read_existing_directory())
+                    .await?;
+                let result = async {
+                    loop {
+                        let bytes = session.query_directory(
+                            &directory,
+                            QueryDirectoryOptions::new(
+                                FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
+                                "*",
+                                DIRECTORY_QUERY_BUFFER_BYTES,
+                            ),
+                        ).await?;
+                        if bytes.is_empty() { break; }
+                        let entries = decode_file_id_full_directory_metadata(&bytes)?;
+                        accumulate_directory_entries(&entries, &path, &mut pending, &mut total);
+                    }
+                    Ok::<(), AndroidBridgeError>(())
+                }.await;
+                let closed = session.close_file(directory, CloseOptions::default()).await;
+                result?;
+                closed?;
+            }
+            Ok::<i64, AndroidBridgeError>(total as i64)
+        })
     }
 
     /// Remove the handle and close the SMB directory. A later read cannot resurrect its cursor.
@@ -952,6 +1012,43 @@ fn cancelled_bridge_error() -> AndroidBridgeError {
     AndroidBridgeError::Stream(StreamError::Client(ClientError::Cancelled))
 }
 
+/// Tiny versioned JNI payload: ASCII XSS1 + totalBytes i64 LE + callerFreeBytes i64 LE.
+fn encode_capacity_bytes(total: i64, caller_free: i64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(20);
+    data.extend_from_slice(b"XSS1");
+    data.extend_from_slice(&total.to_le_bytes());
+    data.extend_from_slice(&caller_free.to_le_bytes());
+    data
+}
+
+/// Only descend into genuine directories; reparse points can escape or loop back.
+/// Accumulate bytes in a bounded Java Long range, not allocation or whole subtree size.
+fn accumulate_directory_entries(
+    entries: &[DirectoryMetadataEntry],
+    path: &str,
+    pending: &mut Vec<String>,
+    total: &mut u64,
+) {
+    for entry in entries {
+        if entry.name.is_empty() || entry.name == "." || entry.name == ".." ||
+            entry.name.contains('/') || entry.name.contains('\\') ||
+            entry.name.contains('\0') {
+            continue;
+        }
+        if entry.file_attributes & 0x10 != 0 {
+            if entry.file_attributes & 0x400 == 0 {
+                pending.push(if path.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{path}/{}", entry.name)
+                });
+            }
+        } else {
+            *total = total.saturating_add(entry.end_of_file).min(i64::MAX as u64);
+        }
+    }
+}
+
 const MAX_DIRECTORY_RESULT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Build one complete, versioned little-endian payload or fail; never return truncated entries.
@@ -1208,7 +1305,7 @@ mod tests {
     }
     #[test]
     fn legacy_mutation_contract_is_retained_in_jni_v7() {
-        assert_eq!(crate::API_VERSION, 8);
+        assert_eq!(crate::API_VERSION, 9);
     }
 
     #[test]
@@ -1480,7 +1577,7 @@ mod tests {
             AndroidEngine::flush_writable;
         let _close: fn(&AndroidEngine, WritableHandle) -> Result<(), AndroidBridgeError> =
             AndroidEngine::close_writable;
-        assert_eq!(crate::API_VERSION, 8);
+        assert_eq!(crate::API_VERSION, 9);
     }
 
     #[test]
@@ -1532,7 +1629,7 @@ mod tests {
         assert!(engine.flush_random(invalid).is_err());
         assert!(engine.set_random_length(invalid, 0).is_err());
         assert!(engine.close_random(invalid).is_err());
-        assert_eq!(crate::API_VERSION, 8);
+        assert_eq!(crate::API_VERSION, 9);
     }
 
     #[test]
