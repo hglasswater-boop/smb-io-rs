@@ -7,7 +7,8 @@ mod engine;
 mod jni;
 
 pub use engine::{
-    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, VideoHandle, VideoOpenRequest, SmbMutationRequest,
+    AndroidBridgeError, AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoHandle,
+    VideoOpenRequest,
 };
 
 /// Android bridge API generation that adds one-shot non-retrying mkdir to the video API.
