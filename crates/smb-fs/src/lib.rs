@@ -8,7 +8,7 @@
 mod mutation;
 mod query;
 
-pub use mutation::{FsMutationError, delete_directory, delete_file, mkdir, rename};
+pub use mutation::{FsMutationError, create_file, delete_directory, delete_file, mkdir, rename};
 pub use query::{
     DirectoryMetadataEntry, DirectoryNameEntry, FileStandardInformation, FsQueryError,
     decode_file_id_full_directory_information, decode_file_id_full_directory_metadata,
