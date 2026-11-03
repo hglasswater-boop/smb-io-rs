@@ -75,7 +75,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     closed?;
 
     if files < 1_000 || pages < 2 {
-        return Err(format!("expected >=1000 files across 2+ pages, got files={files}, pages={pages}").into());
+        return Err(format!(
+            "expected >=1000 files across 2+ pages, got files={files}, pages={pages}"
+        )
+        .into());
     }
     println!("directory_pages_entries: {files}");
     println!("directory_pages_count: {pages}");
