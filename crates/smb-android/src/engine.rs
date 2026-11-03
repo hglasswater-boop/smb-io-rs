@@ -7,11 +7,14 @@ use std::time::Duration;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
-    ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig, QueryDirectoryOptions,
-    ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError, SessionConnection,
-    SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions, TreeHandle,
+    ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig,
+    QueryDirectoryOptions, ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError,
+    SessionConnection, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
+    TreeHandle,
 };
-use smb_io_fs::{DirectoryMetadataEntry, FsMutationError, FsQueryError, decode_file_id_full_directory_metadata};
+use smb_io_fs::{
+    DirectoryMetadataEntry, FsMutationError, FsQueryError, decode_file_id_full_directory_metadata,
+};
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
     recovering_video_broker_with_policy,
@@ -287,7 +290,9 @@ impl DirectoryHandle {
 
     fn table_key(self) -> Result<VideoHandle, AndroidBridgeError> {
         if self.0 & DIRECTORY_HANDLE_FLAG == 0 || self.0 == DIRECTORY_HANDLE_FLAG {
-            return Err(AndroidBridgeError::InvalidConfig("invalid directory handle"));
+            return Err(AndroidBridgeError::InvalidConfig(
+                "invalid directory handle",
+            ));
         }
         Ok(VideoHandle::from_raw(self.0 & !DIRECTORY_HANDLE_FLAG))
     }
@@ -298,7 +303,6 @@ struct DirectorySession {
     directory: FileHandle,
     exhausted: bool,
 }
-
 
 /// Long-lived runtime and opaque-handle owner for the Android/JNI adapter.
 ///
@@ -523,7 +527,9 @@ impl AndroidEngine {
             "*",
             DIRECTORY_QUERY_BUFFER_BYTES,
         );
-        let buffer = self.runtime.block_on(session.query_directory(directory, options))?;
+        let buffer = self
+            .runtime
+            .block_on(session.query_directory(directory, options))?;
         if buffer.is_empty() {
             *exhausted = true;
             return encode_directory_metadata(&[]);
@@ -590,7 +596,9 @@ fn encode_directory_metadata(
             .checked_add(name.len())
             .and_then(|size| size.checked_add(28))
             .and_then(|size| size.checked_add(bytes.len()))
-            .ok_or(AndroidBridgeError::InvalidConfig("directory listing length overflow"))?;
+            .ok_or(AndroidBridgeError::InvalidConfig(
+                "directory listing length overflow",
+            ))?;
         if required > MAX_DIRECTORY_RESULT_BYTES {
             return Err(AndroidBridgeError::InvalidConfig(
                 "directory listing exceeds maximum JNI payload",
@@ -913,7 +921,14 @@ mod tests {
     #[test]
     fn directory_query_rejects_unsafe_paths_without_network_access() {
         let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
-        for path in ["/absolute", r"\absolute", "../parent", "./dot", r"foo\..\bar", "nul\0name"] {
+        for path in [
+            "/absolute",
+            r"\absolute",
+            "../parent",
+            "./dot",
+            r"foo\..\bar",
+            "nul\0name",
+        ] {
             let request = SmbMutationRequest::new("no-such-host.invalid", "files", path, "", "");
             assert!(
                 matches!(
@@ -950,10 +965,22 @@ mod tests {
         let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         assert_eq!(&bytes[12..12 + length], "映画\t一.mkv".as_bytes());
         let pos = 12 + length;
-        assert_eq!(u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()), 0x22);
-        assert_eq!(u64::from_le_bytes(bytes[pos + 4..pos + 12].try_into().unwrap()), 123);
-        assert_eq!(u64::from_le_bytes(bytes[pos + 12..pos + 20].try_into().unwrap()), 133_000_000_000_000_000);
-        assert_eq!(u64::from_le_bytes(bytes[pos + 20..pos + 28].try_into().unwrap()), 133_001_000_000_000_000);
+        assert_eq!(
+            u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()),
+            0x22
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[pos + 4..pos + 12].try_into().unwrap()),
+            123
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[pos + 12..pos + 20].try_into().unwrap()),
+            133_000_000_000_000_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[pos + 20..pos + 28].try_into().unwrap()),
+            133_001_000_000_000_000
+        );
         assert_eq!(bytes.len(), pos + 28);
     }
 
@@ -961,8 +988,10 @@ mod tests {
     fn directory_cursor_handle_contract_is_independent_from_video_handles() {
         // A live directory session keeps its SMB cursor across repeated read calls.
         // The native API no longer returns one giant ByteArray for a whole folder.
-        let _open: fn(&AndroidEngine, SmbMutationRequest) -> Result<DirectoryHandle, AndroidBridgeError> =
-            AndroidEngine::open_directory;
+        let _open: fn(
+            &AndroidEngine,
+            SmbMutationRequest,
+        ) -> Result<DirectoryHandle, AndroidBridgeError> = AndroidEngine::open_directory;
         let _next: fn(&AndroidEngine, DirectoryHandle) -> Result<Vec<u8>, AndroidBridgeError> =
             AndroidEngine::read_directory_page;
         let _close: fn(&AndroidEngine, DirectoryHandle) -> Result<(), AndroidBridgeError> =
@@ -981,7 +1010,10 @@ mod tests {
             creation_time: 0,
             last_write_time: 0,
         };
-        assert_ne!(encode_directory_metadata(&[entry]).unwrap(), b"XFL1\0\0\0\0");
+        assert_ne!(
+            encode_directory_metadata(&[entry]).unwrap(),
+            b"XFL1\0\0\0\0"
+        );
     }
 
     #[test]
@@ -1002,5 +1034,4 @@ mod tests {
         };
         assert!(encode_directory_metadata(&[entry]).is_err());
     }
-
 }
