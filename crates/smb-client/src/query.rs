@@ -20,6 +20,12 @@ pub struct QueryInfoOptions {
 }
 
 impl QueryInfoOptions {
+    pub fn filesystem(file_info_class: u8, output_buffer_length: u32) -> Self {
+        let mut options = Self::file(file_info_class, output_buffer_length);
+        options.info_type = smb_io_wire::info_type::FILESYSTEM;
+        options
+    }
+
     pub fn file(file_info_class: u8, output_buffer_length: u32) -> Self {
         Self {
             info_type: smb_io_wire::info_type::FILE,
