@@ -74,40 +74,8 @@ jobs:
           cargo run -p smb-io-probe --example file_management -- \
             127.0.0.1 "$SMB_PORT" auth phase9 "$SMB_USER" "$SMB_PASSWORD" \
             2>&1 | tee /tmp/phase9.log
-          grep -q '^mkdir_verified: true
-          grep -q '^unicode_rename_verified: true$' /tmp/phase9.log
-          grep -q '^collision_verified: true$' /tmp/phase9.log
-          grep -q '^replace_existing_verified: true$' /tmp/phase9.log
-          grep -q '^file_delete_verified: true$' /tmp/phase9.log
-          grep -q '^nonempty_directory_guard_verified: true$' /tmp/phase9.log
-          grep -q '^directory_delete_verified: true$' /tmp/phase9.log
-          grep -q '^query_info_verified: true$' /tmp/phase9.log
-          grep -q '^phase9_verified: true$' /tmp/phase9.log
-
-      - name: Show diagnostics on failure
-        if: failure()
-        run: |
-          cat /tmp/phase9.log 2>/dev/null || true
-          sudo cat /tmp/smb-phase9.log 2>/dev/null || true
-          sudo find /tmp/smb-phase9 -maxdepth 4 -printf '%y %p\n' 2>/dev/null || true
- /tmp/phase9.log
-          grep -q '^exclusive_create_file_verified: true
-          grep -q '^unicode_rename_verified: true$' /tmp/phase9.log
-          grep -q '^collision_verified: true$' /tmp/phase9.log
-          grep -q '^replace_existing_verified: true$' /tmp/phase9.log
-          grep -q '^file_delete_verified: true$' /tmp/phase9.log
-          grep -q '^nonempty_directory_guard_verified: true$' /tmp/phase9.log
-          grep -q '^directory_delete_verified: true$' /tmp/phase9.log
-          grep -q '^query_info_verified: true$' /tmp/phase9.log
-          grep -q '^phase9_verified: true$' /tmp/phase9.log
-
-      - name: Show diagnostics on failure
-        if: failure()
-        run: |
-          cat /tmp/phase9.log 2>/dev/null || true
-          sudo cat /tmp/smb-phase9.log 2>/dev/null || true
-          sudo find /tmp/smb-phase9 -maxdepth 4 -printf '%y %p\n' 2>/dev/null || true
- /tmp/phase9.log
+          grep -q '^mkdir_verified: true$' /tmp/phase9.log
+          grep -q '^exclusive_create_file_verified: true$' /tmp/phase9.log
           grep -q '^unicode_rename_verified: true$' /tmp/phase9.log
           grep -q '^collision_verified: true$' /tmp/phase9.log
           grep -q '^replace_existing_verified: true$' /tmp/phase9.log
