@@ -535,9 +535,10 @@ impl AndroidEngine {
     /// Remove the handle and close the SMB directory. A later read cannot resurrect its cursor.
     pub fn close_directory(&self, handle: DirectoryHandle) -> Result<(), AndroidBridgeError> {
         let entry = self.directories.remove(handle.table_key()?)?;
-        let state = lock(&entry)?;
+        let mut state = lock(&entry)?;
+        let directory = state.directory.clone();
         self.runtime
-            .block_on(state.session.close_file(state.directory.clone(), CloseOptions::default()))
+            .block_on(state.session.close_file(directory, CloseOptions::default()))
             .map(|_| ())
             .map_err(AndroidBridgeError::from)
     }
