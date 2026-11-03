@@ -80,6 +80,8 @@ jobs:
           grep -q '^write_large_verified: true$' /tmp/phase8-write.log
           grep -q '^write_positional_verified: true$' /tmp/phase8-write.log
           grep -q '^write_flush_verified: true$' /tmp/phase8-write.log
+          grep -q '^set_eof_shrink_verified: true$' /tmp/phase8-write.log
+          grep -q '^set_eof_extend_zero_tail_verified: true$' /tmp/phase8-write.log
           grep -q '^write_roundtrip_verified: true$' /tmp/phase8-write.log
 
       - name: Verify persistent writable JNI engine with mandatory signed Samba
