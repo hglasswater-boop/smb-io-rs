@@ -67,7 +67,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if original.len() != 0 {
         return Err("colliding FILE_CREATE modified existing file".into());
     }
-    session.close_file(original, CloseOptions::default()).await?;
+    session
+        .close_file(original, CloseOptions::default())
+        .await?;
     delete_file(&mut session, &tree, &empty).await?;
     println!("exclusive_create_file_verified: true");
 
