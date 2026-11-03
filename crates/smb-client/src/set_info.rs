@@ -203,6 +203,17 @@ mod tests {
     }
 
     #[test]
+    fn eof_resize_payload_rejects_above_i64_max_before_network() {
+        assert!(smb_io_wire::FileEndOfFileInformation::new(i64::MAX as u64 + 1).is_err());
+        assert_eq!(
+            smb_io_wire::FileEndOfFileInformation::new(4)
+                .unwrap()
+                .encode(),
+            4i64.to_le_bytes()
+        );
+    }
+
+    #[test]
     fn server_status_is_preserved() {
         let status = 0xC000_0035;
         match validate_set_info_status(StatusField::Status(status)) {
