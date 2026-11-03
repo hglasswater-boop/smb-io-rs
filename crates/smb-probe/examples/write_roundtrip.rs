@@ -92,6 +92,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     session.close_file(file, CloseOptions::default()).await?;
 
+    // FILE_OPEN + FILE_END_OF_FILE_INFORMATION must preserve the retained prefix.
+    let retained = size / 2;
+    let file = session
+        .open_file(&tree, &path, FileOpenOptions::write_existing_random())
+        .await?;
+    session.set_end_of_file(&file, retained as u64).await?;
+    session.flush_file(&file).await?;
+    session.close_file(file, CloseOptions::default()).await?;
+
+    let file = session
+        .open_file(&tree, &path, FileOpenOptions::read_existing_random())
+        .await?;
+    if file.len() != retained as u64 {
+        return Err("SET_INFO shrink did not change EOF".into());
+    }
+    let kept = session.read_at(&file, 0, retained).await?;
+    if kept != expected[..retained] {
+        return Err("SET_INFO shrink corrupted the retained prefix".into());
+    }
+    session.close_file(file, CloseOptions::default()).await?;
+    println!("set_eof_shrink_verified: true");
+
+    // Extension must not resurrect discarded bytes from the original larger file.
+    let file = session
+        .open_file(&tree, &path, FileOpenOptions::write_existing_random())
+        .await?;
+    session.set_end_of_file(&file, size as u64).await?;
+    session.flush_file(&file).await?;
+    session.close_file(file, CloseOptions::default()).await?;
+
+    let file = session
+        .open_file(&tree, &path, FileOpenOptions::read_existing_random())
+        .await?;
+    if file.len() != size as u64 {
+        return Err("SET_INFO extend did not change EOF".into());
+    }
+    let extended = session.read_at(&file, 0, size).await?;
+    if extended.len() != size || extended[..retained] != expected[..retained] {
+        return Err("SET_INFO extend corrupted the retained prefix".into());
+    }
+    if extended[retained..].iter().any(|&byte| byte != 0) {
+        return Err("SET_INFO extended tail leaked stale bytes".into());
+    }
+    session.close_file(file, CloseOptions::default()).await?;
+    println!("set_eof_extend_zero_tail_verified: true");
+
     println!("write_large_bytes: {size}");
     println!("write_positional_offset: {PATCH_OFFSET}");
     println!("write_create_verified: true");
