@@ -82,6 +82,27 @@ where
     Ok(())
 }
 
+/// Create one new empty regular file, failing on name collision without overwriting anything.
+pub async fn create_file<T>(
+    session: &mut SessionConnection<T>,
+    tree: &TreeHandle,
+    path: impl Into<String>,
+) -> Result<(), FsMutationError>
+where
+    T: Transport,
+{
+    let path = normalize_mutation_path(path.into())?;
+    let file = session
+        .open_file(tree, path, FileOpenOptions::create_new_random())
+        .await
+        .map_err(map_client_error)?;
+    session
+        .close_file(file, CloseOptions::default())
+        .await
+        .map_err(map_client_error)?;
+    Ok(())
+}
+
 pub async fn rename<T>(
     session: &mut SessionConnection<T>,
     tree: &TreeHandle,
