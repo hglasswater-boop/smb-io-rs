@@ -14,8 +14,8 @@ use jni::sys::{jbyte, jint, jlong};
 use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
 use crate::{
-    API_VERSION, AndroidEngine, AndroidEngineConfig, DirectoryHandle, SmbMutationRequest,
-    VideoHandle, VideoOpenRequest, WritableHandle,
+    API_VERSION, AndroidEngine, AndroidEngineConfig, DirectoryHandle, RandomHandle,
+    SmbMutationRequest, VideoHandle, VideoOpenRequest, WritableHandle,
 };
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
@@ -396,6 +396,230 @@ pub fn native_close_writable<'local>(
                 Err(error) => return throw_io(env, error),
             };
             match engine.close_writable(WritableHandle::from_raw(handle as u64)) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Open an existing file without truncating it; unlike OVERWRITE_IF output streams.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_open_random<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    path: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) -> jlong {
+    unowned_env
+        .with_env(|env| -> JniResult<jlong> {
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(0);
+            };
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.open_random(request) {
+                Ok(handle) => Ok(handle.raw() as jlong),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Read 0 for zero-byte request, -1 at EOF, and never return fabricated data on error.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_read_random_at<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    position: jlong,
+    destination: JByteArray<'local>,
+    destination_offset: jint,
+    length: jint,
+) -> jint {
+    unowned_env
+        .with_env(|env| -> JniResult<jint> {
+            if handle <= 0 || position < 0 {
+                return throw_argument(
+                    env,
+                    "random SMB handle and read position must be nonnegative",
+                );
+            }
+            if destination_offset < 0 || !(0..=1024 * 1024).contains(&length) {
+                return throw_argument(env, "random SMB read range invalid or exceeds 1 MiB");
+            }
+            let array_len = destination.len(env)?;
+            let Some(end) = (destination_offset as usize).checked_add(length as usize) else {
+                return throw_argument(env, "random SMB destination range overflow");
+            };
+            if end > array_len {
+                return throw_argument(env, "random SMB read exceeds destination array");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            let bytes = match engine.read_random_at(
+                RandomHandle::from_raw(handle as u64),
+                position as u64,
+                length as usize,
+            ) {
+                Ok(bytes) => bytes,
+                Err(error) => return throw_io(env, error),
+            };
+            if bytes.is_empty() && length != 0 {
+                return Ok(-1);
+            }
+            destination.set_region(env, destination_offset, as_jbytes(&bytes))?;
+            match jint::try_from(bytes.len()) {
+                Ok(count) => Ok(count),
+                Err(_) => throw_io(env, "random SMB read count exceeds Java Int"),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Position-based WRITE; return an error instead of retrying ambiguous partial writes.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_write_random_at<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    position: jlong,
+    source: JByteArray<'local>,
+    source_offset: jint,
+    length: jint,
+) -> jint {
+    unowned_env
+        .with_env(|env| -> JniResult<jint> {
+            if handle <= 0 || position < 0 {
+                return throw_argument(
+                    env,
+                    "random SMB handle and write position must be nonnegative",
+                );
+            }
+            if source_offset < 0 || !(0..=1024 * 1024).contains(&length) {
+                return throw_argument(env, "random SMB write range invalid or exceeds 1 MiB");
+            }
+            let array_len = source.len(env)?;
+            let Some(end) = (source_offset as usize).checked_add(length as usize) else {
+                return throw_argument(env, "random SMB source range overflow");
+            };
+            if end > array_len {
+                return throw_argument(env, "random SMB write exceeds source array");
+            }
+            let mut input = vec![0i8; length as usize];
+            if length > 0 {
+                source.get_region(env, source_offset, &mut input)?;
+            }
+            let bytes: Vec<u8> = input.into_iter().map(|byte| byte as u8).collect();
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.write_random_at(
+                RandomHandle::from_raw(handle as u64),
+                position as u64,
+                &bytes,
+            ) {
+                Ok(count) => match jint::try_from(count) {
+                    Ok(count) => Ok(count),
+                    Err(_) => throw_io(env, "random SMB write count exceeds Java Int"),
+                },
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Mutate the EOF of the existing open file, never a new/truncated file.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_set_random_length<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    length: jlong,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            if handle <= 0 || length < 0 {
+                return throw_argument(
+                    env,
+                    "random SMB handle must be positive and length nonnegative",
+                );
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.set_random_length(RandomHandle::from_raw(handle as u64), length as u64) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_flush_random<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            if handle <= 0 {
+                return throw_argument(env, "random SMB handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.flush_random(RandomHandle::from_raw(handle as u64)) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Dispose of the native handle even if WRITE/SET_INFO/FLUSH previously failed.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_close_random<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            if handle <= 0 {
+                return throw_argument(env, "random SMB handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.close_random(RandomHandle::from_raw(handle as u64)) {
                 Ok(()) => Ok(()),
                 Err(error) => throw_io(env, error),
             }

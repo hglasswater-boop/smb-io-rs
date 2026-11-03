@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -345,6 +345,49 @@ struct WritableSession {
     poisoned: bool,
 }
 
+/// A separate handle namespace is required: opening an existing edit target must never
+/// accidentally use the v7 output stream's truncating OVERWRITE_IF semantics.
+const RANDOM_HANDLE_FLAG: u64 = 1u64 << 60;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RandomHandle(u64);
+
+impl RandomHandle {
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    fn table_key(self) -> Result<VideoHandle, AndroidBridgeError> {
+        if self.0 & RANDOM_HANDLE_FLAG == 0
+            || self.0 & (DIRECTORY_HANDLE_FLAG | WRITABLE_HANDLE_FLAG | (1u64 << 63)) != 0
+            || self.0 == RANDOM_HANDLE_FLAG
+        {
+            return Err(AndroidBridgeError::InvalidConfig(
+                "invalid random-access handle",
+            ));
+        }
+        Ok(VideoHandle::from_raw(self.0 & !RANDOM_HANDLE_FLAG))
+    }
+}
+
+struct RandomSession {
+    session: SessionConnection<TcpTransport>,
+    file: FileHandle,
+    poisoned: bool,
+}
+
+struct RandomEntry {
+    /// Set immediately after the table removes the handle, including while a network request
+    /// holds the state lock. A waiter must not issue I/O after CLOSE has claimed this handle.
+    closing: AtomicBool,
+    state: Mutex<RandomSession>,
+}
+
 /// Long-lived runtime and opaque-handle owner for the Android/JNI adapter.
 ///
 /// JNI functions remain mechanical wrappers around this type. SMB lifecycle, reconnect,
@@ -355,6 +398,7 @@ pub struct AndroidEngine {
     videos: HandleTable<VideoSession>,
     directories: HandleTable<Mutex<DirectorySession>>,
     writers: HandleTable<Mutex<WritableSession>>,
+    randoms: HandleTable<RandomEntry>,
     max_read_bytes: usize,
     reconnect_policy: ReadReconnectPolicy,
 }
@@ -382,6 +426,7 @@ impl AndroidEngine {
             videos: HandleTable::new(),
             directories: HandleTable::new(),
             writers: HandleTable::new(),
+            randoms: HandleTable::new(),
             max_read_bytes: config.max_read_bytes,
             reconnect_policy: ReadReconnectPolicy {
                 max_connect_attempts: config.read_reconnect_attempts,
@@ -692,6 +737,193 @@ impl AndroidEngine {
             .map_err(AndroidBridgeError::from)
     }
 
+    /// Open an already-existing regular file for non-truncating positional edits.
+    pub fn open_random(
+        &self,
+        request: SmbMutationRequest,
+    ) -> Result<RandomHandle, AndroidBridgeError> {
+        validate_mutation_request(&request)?;
+        let state = self.runtime.block_on(async move {
+            let (mut session, tree, path) = connect_share(request).await?;
+            let file = session
+                .open_file(&tree, path, FileOpenOptions::write_existing_random())
+                .await?;
+            Ok::<_, AndroidBridgeError>(RandomSession {
+                session,
+                file,
+                poisoned: false,
+            })
+        })?;
+        let id = self.randoms.insert(RandomEntry {
+            closing: AtomicBool::new(false),
+            state: Mutex::new(state),
+        })?;
+        Ok(RandomHandle(id.raw() | RANDOM_HANDLE_FLAG))
+    }
+
+    /// Read one bounded chunk from the still-open random-access handle. Zero bytes means EOF.
+    pub fn read_random_at(
+        &self,
+        handle: RandomHandle,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, AndroidBridgeError> {
+        if length > MAX_JNI_WRITE_BYTES {
+            return Err(AndroidBridgeError::ReadTooLarge {
+                requested: length,
+                maximum: MAX_JNI_WRITE_BYTES,
+            });
+        }
+        let entry = self.randoms.get(handle.table_key()?)?;
+        let mut state = lock(&entry.state)?;
+        if entry.closing.load(Ordering::Acquire) || state.poisoned {
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
+        }
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
+        match self.runtime.block_on(session.read_at(file, offset, length)) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => {
+                *poisoned = true;
+                Err(AndroidBridgeError::from(error))
+            }
+        }
+    }
+
+    /// Write one bounded chunk; after a successful extended WRITE, update the cached EOF.
+    pub fn write_random_at(
+        &self,
+        handle: RandomHandle,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, AndroidBridgeError> {
+        if data.len() > MAX_JNI_WRITE_BYTES {
+            return Err(AndroidBridgeError::WriteTooLarge {
+                requested: data.len(),
+                maximum: MAX_JNI_WRITE_BYTES,
+            });
+        }
+        let end =
+            offset
+                .checked_add(data.len() as u64)
+                .ok_or(AndroidBridgeError::InvalidConfig(
+                    "random-access write offset overflow",
+                ))?;
+        if end > i64::MAX as u64 {
+            return Err(AndroidBridgeError::InvalidConfig(
+                "random-access write exceeds signed EOF",
+            ));
+        }
+        let entry = self.randoms.get(handle.table_key()?)?;
+        let mut state = lock(&entry.state)?;
+        if entry.closing.load(Ordering::Acquire) || state.poisoned {
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
+        }
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
+        match self.runtime.block_on(session.write_at(file, offset, data)) {
+            Ok(count) if count == data.len() => {
+                file.record_confirmed_len(file.len().max(end));
+                Ok(count)
+            }
+            Ok(_) => {
+                *poisoned = true;
+                Err(AndroidBridgeError::InternalState(
+                    "short random-access SMB WRITE",
+                ))
+            }
+            Err(error) => {
+                *poisoned = true;
+                Err(AndroidBridgeError::from(error))
+            }
+        }
+    }
+
+    /// Send one signed SET_INFO; never replay after a lost response.
+    pub fn set_random_length(
+        &self,
+        handle: RandomHandle,
+        length: u64,
+    ) -> Result<(), AndroidBridgeError> {
+        if length > i64::MAX as u64 {
+            return Err(AndroidBridgeError::InvalidConfig(
+                "random-access length exceeds signed EOF",
+            ));
+        }
+        let entry = self.randoms.get(handle.table_key()?)?;
+        let mut state = lock(&entry.state)?;
+        if entry.closing.load(Ordering::Acquire) || state.poisoned {
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
+        }
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
+        match self.runtime.block_on(session.set_end_of_file(file, length)) {
+            Ok(()) => {
+                file.record_confirmed_len(length);
+                Ok(())
+            }
+            Err(error) => {
+                *poisoned = true;
+                Err(AndroidBridgeError::from(error))
+            }
+        }
+    }
+
+    pub fn flush_random(&self, handle: RandomHandle) -> Result<(), AndroidBridgeError> {
+        let entry = self.randoms.get(handle.table_key()?)?;
+        let mut state = lock(&entry.state)?;
+        if entry.closing.load(Ordering::Acquire) || state.poisoned {
+            return Err(AndroidBridgeError::InternalState(
+                "random-access SMB handle is closed or failed",
+            ));
+        }
+        let RandomSession {
+            session,
+            file,
+            poisoned,
+        } = &mut *state;
+        match self.runtime.block_on(session.flush_file(file)) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *poisoned = true;
+                Err(AndroidBridgeError::from(error))
+            }
+        }
+    }
+
+    /// Invalidate immediately; in-flight operations finish before the network CLOSE.
+    pub fn close_random(&self, handle: RandomHandle) -> Result<(), AndroidBridgeError> {
+        let entry = self.randoms.remove(handle.table_key()?)?;
+        entry.closing.store(true, Ordering::Release);
+        let mut state = lock(&entry.state)?;
+        let file = state.file.clone();
+        self.runtime
+            .block_on(state.session.close_file(file, CloseOptions::default()))
+            .map(|_| ())
+            .map_err(AndroidBridgeError::from)
+    }
+
     fn validate_read_length(&self, length: usize) -> Result<(), AndroidBridgeError> {
         if length > self.max_read_bytes {
             return Err(AndroidBridgeError::ReadTooLarge {
@@ -976,7 +1208,7 @@ mod tests {
     }
     #[test]
     fn legacy_mutation_contract_is_retained_in_jni_v7() {
-        assert_eq!(crate::API_VERSION, 7);
+        assert_eq!(crate::API_VERSION, 8);
     }
 
     #[test]
@@ -1248,7 +1480,80 @@ mod tests {
             AndroidEngine::flush_writable;
         let _close: fn(&AndroidEngine, WritableHandle) -> Result<(), AndroidBridgeError> =
             AndroidEngine::close_writable;
-        assert_eq!(crate::API_VERSION, 7);
+        assert_eq!(crate::API_VERSION, 8);
+    }
+
+    #[test]
+    fn random_access_handle_has_a_disjoint_tag_and_cannot_cross_call() {
+        let valid = RandomHandle::from_raw(RANDOM_HANDLE_FLAG | 1);
+        assert_eq!(valid.table_key().unwrap().raw(), 1);
+        assert!(RandomHandle::from_raw(1).table_key().is_err());
+        assert!(
+            RandomHandle::from_raw(WRITABLE_HANDLE_FLAG | 1)
+                .table_key()
+                .is_err()
+        );
+        assert!(
+            RandomHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1)
+                .table_key()
+                .is_err()
+        );
+        assert!(WritableHandle::from_raw(valid.raw()).table_key().is_err());
+        assert!(DirectoryHandle::from_raw(valid.raw()).table_key().is_err());
+    }
+
+    #[test]
+    fn random_access_open_rejects_invalid_paths_before_transport() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in ["", "../escape", "/absolute", "./dot", "nul\0name"] {
+            let request = SmbMutationRequest::new("no-such-host.invalid", "share", path, "", "");
+            assert!(
+                matches!(
+                    engine.open_random(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "accepted unsafe random-access path: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn random_access_calls_are_bounded_and_invalid_handles_reject() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        let invalid = RandomHandle::from_raw(RANDOM_HANDLE_FLAG | 999);
+        assert!(matches!(
+            engine.read_random_at(invalid, 0, MAX_JNI_WRITE_BYTES + 1),
+            Err(AndroidBridgeError::ReadTooLarge { .. })
+        ));
+        assert!(matches!(
+            engine.write_random_at(invalid, 0, &vec![1; MAX_JNI_WRITE_BYTES + 1]),
+            Err(AndroidBridgeError::WriteTooLarge { .. })
+        ));
+        assert!(engine.flush_random(invalid).is_err());
+        assert!(engine.set_random_length(invalid, 0).is_err());
+        assert!(engine.close_random(invalid).is_err());
+        assert_eq!(crate::API_VERSION, 8);
+    }
+
+    #[test]
+    fn random_access_native_method_types_are_stable() {
+        let _open: fn(
+            &AndroidEngine,
+            SmbMutationRequest,
+        ) -> Result<RandomHandle, AndroidBridgeError> = AndroidEngine::open_random;
+        let _read = AndroidEngine::read_random_at;
+        let _write: fn(
+            &AndroidEngine,
+            RandomHandle,
+            u64,
+            &[u8],
+        ) -> Result<usize, AndroidBridgeError> = AndroidEngine::write_random_at;
+        let _set_length: fn(&AndroidEngine, RandomHandle, u64) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::set_random_length;
+        let _flush: fn(&AndroidEngine, RandomHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::flush_random;
+        let _close: fn(&AndroidEngine, RandomHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::close_random;
     }
 
     #[test]

@@ -96,6 +96,21 @@ jobs:
           grep -q '^writable_stream_readback_verified: true$' /tmp/phase8-writable-jni.log
           grep -q '^writable_stream_closed_handle_verified: true$' /tmp/phase8-writable-jni.log
 
+      - name: Verify existing-file JNI random edits with signed Samba
+        run: |
+          set -o pipefail
+          sudo -u "$SMB_USER" dd if=/dev/zero of=/tmp/smb-phase8-write/random-v8.bin bs=1048576 count=5 status=none
+          cargo run -p smb-io-android --example random_edit -- \
+            127.0.0.1 "$SMB_PORT" auth random-v8.bin "$SMB_USER" "$SMB_PASSWORD" \
+            2>&1 | tee /tmp/phase8-random-v8.log
+          grep -q '^random_missing_not_created_verified: true$' /tmp/phase8-random-v8.log
+          grep -q '^random_nontruncating_open_verified: true$' /tmp/phase8-random-v8.log
+          grep -q '^random_positional_roundtrip_verified: true$' /tmp/phase8-random-v8.log
+          grep -q '^random_shrink_cached_eof_verified: true$' /tmp/phase8-random-v8.log
+          grep -q '^random_extend_zero_tail_verified: true$' /tmp/phase8-random-v8.log
+          grep -q '^random_closed_handle_rejected_verified: true$' /tmp/phase8-random-v8.log
+          grep -q '^random_reopen_flush_verified: true$' /tmp/phase8-random-v8.log
+
       - name: Show diagnostics on failure
         if: failure()
         run: |
