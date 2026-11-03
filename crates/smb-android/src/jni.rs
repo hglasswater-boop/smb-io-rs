@@ -231,6 +231,54 @@ pub fn native_read_directory_page<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Quota-aware total and caller-free bytes on an authenticated directory handle.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_directory_capacity<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) -> JByteArray<'local> {
+    unowned_env
+        .with_env(|env| -> JniResult<JByteArray<'local>> {
+            if handle <= 0 {
+                return throw_argument(env, "directory handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.directory_capacity(DirectoryHandle::from_raw(handle as u64)) {
+                Ok(data) => env.byte_array_from_slice(&data),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Recursive size computed with signed directory pages and one SMB session.
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_directory_size<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+) -> jlong {
+    unowned_env
+        .with_env(|env| -> JniResult<jlong> {
+            if handle <= 0 {
+                return throw_argument(env, "directory handle must be positive");
+            }
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.directory_size(DirectoryHandle::from_raw(handle as u64)) {
+                Ok(bytes) => Ok(bytes as jlong),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Close the SMB handle even after a page read fails.
 #[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
 pub fn native_close_directory<'local>(

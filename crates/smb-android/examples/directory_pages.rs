@@ -70,8 +70,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok((names.len(), pages))
     })();
 
+    // Queries use the same signed authenticated session, including after the scan reaches EOF.
+    let metrics = (|| -> Result<(), Box<dyn Error>> {
+        let bytes = engine.directory_capacity(handle)?;
+        if bytes.len() != 20 || &bytes[..4] != b"XSS1" {
+            return Err("invalid XSS1 filesystem capacity response".into());
+        }
+        let total = i64::from_le_bytes(bytes[4..12].try_into()?);
+        let caller_free = i64::from_le_bytes(bytes[12..20].try_into()?);
+        if total <= 0 || caller_free < 0 || caller_free > total {
+            return Err("filesystem capacity does not match expected signed Samba ranges".into());
+        }
+        let size = engine.directory_size(handle)?;
+        let expected = 1_200 + b"XFILES_PHASE6_QUERY".len() as i64 + b"SECOND_ENTRY".len() as i64;
+        if size != expected {
+            return Err(
+                format!("directory size mismatch: expected={expected}, actual={size}").into(),
+            );
+        }
+        println!("filesystem_capacity_verified: true");
+        println!("directory_size_verified: true");
+        Ok(())
+    })();
     let closed = engine.close_directory(handle);
     let (files, pages) = result?;
+    metrics?;
     closed?;
 
     if files < 1_000 || pages < 2 {

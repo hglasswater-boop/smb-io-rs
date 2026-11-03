@@ -45,6 +45,53 @@ impl From<ClientError> for FsQueryError {
     }
 }
 
+/// FileFsFullSizeInformation (SMB2 QUERY_INFO, InfoType=FILESYSTEM, class 7).
+/// CallerAvailableAllocationUnits respects quotas; ActualAvailableAllocationUnits does not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileFsFullSizeInformation {
+    total_units: u64,
+    caller_available_units: u64,
+    sectors_per_unit: u32,
+    bytes_per_sector: u32,
+}
+
+impl FileFsFullSizeInformation {
+    pub fn decode(buffer: &[u8]) -> Result<Self, FsQueryError> {
+        if buffer.len() != 32 {
+            return Err(FsQueryError::InvalidData(
+                "FileFsFullSizeInformation must be 32 bytes",
+            ));
+        }
+        let total = i64::from_le_bytes(buffer[0..8].try_into().expect("fixed slice"));
+        let caller = i64::from_le_bytes(buffer[8..16].try_into().expect("fixed slice"));
+        let actual = i64::from_le_bytes(buffer[16..24].try_into().expect("fixed slice"));
+        let sectors = u32::from_le_bytes(buffer[24..28].try_into().expect("fixed slice"));
+        let bytes = u32::from_le_bytes(buffer[28..32].try_into().expect("fixed slice"));
+        if total < 0 || caller < 0 || actual < 0 || sectors == 0 || bytes == 0 {
+            return Err(FsQueryError::InvalidData(
+                "invalid FileFsFullSizeInformation units",
+            ));
+        }
+        Ok(Self {
+            total_units: total as u64,
+            caller_available_units: caller as u64,
+            sectors_per_unit: sectors,
+            bytes_per_sector: bytes,
+        })
+    }
+
+    /// Java longs cannot represent capacities > i64::MAX; saturate instead of wrapping.
+    pub fn capacity_bytes(self) -> (i64, i64) {
+        let bytes_per_unit = u128::from(self.sectors_per_unit) * u128::from(self.bytes_per_sector);
+        let to_java =
+            |units: u64| (u128::from(units) * bytes_per_unit).min(i64::MAX as u128) as i64;
+        (
+            to_java(self.total_units),
+            to_java(self.caller_available_units),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileStandardInformation {
     pub allocation_size: u64,
@@ -548,5 +595,44 @@ mod tests {
         assert_eq!(entries[1].name, "二番目");
         assert_eq!(entries[1].file_attributes, 0x10);
         assert_eq!(entries[1].end_of_file, 7);
+    }
+    fn full_size_bytes(total: i64, caller: i64, actual: i64, sectors: u32, bytes: u32) -> [u8; 32] {
+        let mut data = [0u8; 32];
+        data[0..8].copy_from_slice(&total.to_le_bytes());
+        data[8..16].copy_from_slice(&caller.to_le_bytes());
+        data[16..24].copy_from_slice(&actual.to_le_bytes());
+        data[24..28].copy_from_slice(&sectors.to_le_bytes());
+        data[28..32].copy_from_slice(&bytes.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn full_size_information_uses_caller_available_for_quota_aware_free_space() {
+        let info =
+            FileFsFullSizeInformation::decode(&full_size_bytes(1000, 20, 300, 8, 512)).unwrap();
+        assert_eq!(info.capacity_bytes(), (4_096_000, 81_920));
+    }
+
+    #[test]
+    fn full_size_information_rejects_invalid_and_truncated_counts() {
+        assert!(FileFsFullSizeInformation::decode(&[0u8; 31]).is_err());
+        assert!(FileFsFullSizeInformation::decode(&full_size_bytes(-1, 1, 1, 8, 512)).is_err());
+        assert!(FileFsFullSizeInformation::decode(&full_size_bytes(1, -1, 1, 8, 512)).is_err());
+        assert!(FileFsFullSizeInformation::decode(&full_size_bytes(1, 1, -1, 8, 512)).is_err());
+        assert!(FileFsFullSizeInformation::decode(&full_size_bytes(1, 1, 1, 0, 512)).is_err());
+        assert!(FileFsFullSizeInformation::decode(&full_size_bytes(1, 1, 1, 8, 0)).is_err());
+    }
+
+    #[test]
+    fn full_size_information_saturates_java_long_capacity() {
+        let info = FileFsFullSizeInformation::decode(&full_size_bytes(
+            i64::MAX,
+            i64::MAX,
+            i64::MAX,
+            u32::MAX,
+            u32::MAX,
+        ))
+        .unwrap();
+        assert_eq!(info.capacity_bytes(), (i64::MAX, i64::MAX));
     }
 }
