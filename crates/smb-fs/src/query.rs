@@ -201,7 +201,8 @@ pub fn decode_file_id_full_directory_metadata(
         let last_write_time =
             u64::from_le_bytes(remaining[24..32].try_into().expect("fixed range"));
         let end_of_file = i64::from_le_bytes(remaining[40..48].try_into().expect("fixed range"));
-        let allocation_size = i64::from_le_bytes(remaining[48..56].try_into().expect("fixed range"));
+        let allocation_size =
+            i64::from_le_bytes(remaining[48..56].try_into().expect("fixed range"));
         if end_of_file < 0 || allocation_size < 0 {
             return Err(FsQueryError::InvalidData(
                 "FileIdFullDirectoryInformation has negative file size or allocation",
@@ -307,14 +308,16 @@ pub async fn read_directory_names_matching<T>(
 where
     T: Transport,
 {
-    Ok(read_directory_metadata_matching(session, directory, pattern)
-        .await?
-        .into_iter()
-        .map(|entry| DirectoryNameEntry {
-            file_index: entry.file_index,
-            name: entry.name,
-        })
-        .collect())
+    Ok(
+        read_directory_metadata_matching(session, directory, pattern)
+            .await?
+            .into_iter()
+            .map(|entry| DirectoryNameEntry {
+                file_index: entry.file_index,
+                name: entry.name,
+            })
+            .collect(),
+    )
 }
 
 /// Paged, signed QUERY_DIRECTORY with size, timestamps, and attribute bits.
@@ -546,5 +549,4 @@ mod tests {
         assert_eq!(entries[1].file_attributes, 0x10);
         assert_eq!(entries[1].end_of_file, 7);
     }
-
 }
