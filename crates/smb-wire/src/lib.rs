@@ -13,6 +13,7 @@ mod create_context;
 mod create_with_contexts;
 mod durable;
 mod error;
+mod flush;
 mod frame;
 mod header;
 mod negotiate;
@@ -48,6 +49,10 @@ pub use durable::{
     DurableHandleResponseV2, durable_handle_flags,
 };
 pub use error::WireError;
+pub use flush::{
+    FLUSH_REQUEST_FIXED_SIZE, FLUSH_REQUEST_STRUCTURE_SIZE, FLUSH_RESPONSE_FIXED_SIZE,
+    FLUSH_RESPONSE_STRUCTURE_SIZE, FlushRequest, FlushResponse,
+};
 pub use frame::{
     DIRECT_TCP_HEADER_SIZE, DIRECT_TCP_MAX_PAYLOAD, decode_direct_tcp_frame,
     decode_direct_tcp_length, encode_direct_tcp_frame,

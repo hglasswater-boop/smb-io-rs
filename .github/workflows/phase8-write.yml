@@ -79,6 +79,7 @@ jobs:
           grep -q '^write_existing_verified: true$' /tmp/phase8-write.log
           grep -q '^write_large_verified: true$' /tmp/phase8-write.log
           grep -q '^write_positional_verified: true$' /tmp/phase8-write.log
+          grep -q '^write_flush_verified: true$' /tmp/phase8-write.log
           grep -q '^write_roundtrip_verified: true$' /tmp/phase8-write.log
 
       - name: Show diagnostics on failure

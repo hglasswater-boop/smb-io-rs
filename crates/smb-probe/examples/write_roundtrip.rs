@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
+    session.flush_file(&file).await?;
     session.close_file(file, CloseOptions::default()).await?;
 
     let file = session
@@ -67,6 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
     expected[PATCH_OFFSET..PATCH_OFFSET + PATCH.len()].copy_from_slice(PATCH);
+    session.flush_file(&file).await?;
     session.close_file(file, CloseOptions::default()).await?;
 
     let file = session
@@ -96,6 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("write_existing_verified: true");
     println!("write_large_verified: true");
     println!("write_positional_verified: true");
+    println!("write_flush_verified: true");
     println!("write_roundtrip_verified: true");
     Ok(())
 }
