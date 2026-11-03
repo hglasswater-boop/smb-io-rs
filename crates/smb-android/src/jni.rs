@@ -13,7 +13,10 @@ use jni::strings::{JNIStr, JNIString};
 use jni::sys::{jbyte, jint, jlong};
 use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
-use crate::{API_VERSION, AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoHandle, VideoOpenRequest};
+use crate::{
+    API_VERSION, AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoHandle,
+    VideoOpenRequest,
+};
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
 
