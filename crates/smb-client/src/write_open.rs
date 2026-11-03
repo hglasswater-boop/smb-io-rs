@@ -6,6 +6,12 @@ use smb_io_wire::{
 use crate::FileOpenOptions;
 
 impl FileOpenOptions {
+    /// Creates a new regular file without opening or modifying an existing destination.
+    /// SMB2 FILE_CREATE is intentionally distinct from OVERWRITE_IF and OPEN_IF.
+    pub const fn create_new_random() -> Self {
+        Self::writable_random(create_disposition::CREATE)
+    }
+
     /// Opens an existing non-directory file for positional read/write I/O.
     pub const fn write_existing_random() -> Self {
         Self::writable_random(create_disposition::OPEN)
