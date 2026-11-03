@@ -1054,6 +1054,59 @@ mod tests {
     }
 
     #[test]
+    fn writable_handles_are_separate_from_video_and_directory_handles() {
+        let valid = WritableHandle::from_raw(WRITABLE_HANDLE_FLAG | 1);
+        assert_eq!(valid.table_key().unwrap().raw(), 1);
+        assert!(WritableHandle::from_raw(1).table_key().is_err());
+        assert!(WritableHandle::from_raw(DIRECTORY_HANDLE_FLAG | 1).table_key().is_err());
+        assert!(DirectoryHandle::from_raw(valid.raw()).table_key().is_err());
+    }
+
+    #[test]
+    fn writable_open_rejects_unsafe_paths_before_network() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in ["", "../escape", "/absolute", r"\absolute", "./dot", "nul\0name"] {
+            let request = SmbMutationRequest::new("no-such-host.invalid", "share", path, "", "");
+            assert!(
+                matches!(
+                    engine.open_writable(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "accepted invalid writable path: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_jni_write_is_rejected_before_touching_any_handle() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        let handle = WritableHandle::from_raw(WRITABLE_HANDLE_FLAG | 1);
+        assert!(matches!(
+            engine.write_writable_at(handle, 0, &vec![1; MAX_JNI_WRITE_BYTES + 1]),
+            Err(AndroidBridgeError::ReadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn writable_native_api_contract_is_open_write_flush_close() {
+        let _open: fn(
+            &AndroidEngine,
+            SmbMutationRequest,
+        ) -> Result<WritableHandle, AndroidBridgeError> = AndroidEngine::open_writable;
+        let _write: fn(
+            &AndroidEngine,
+            WritableHandle,
+            u64,
+            &[u8],
+        ) -> Result<usize, AndroidBridgeError> = AndroidEngine::write_writable_at;
+        let _flush: fn(&AndroidEngine, WritableHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::flush_writable;
+        let _close: fn(&AndroidEngine, WritableHandle) -> Result<(), AndroidBridgeError> =
+            AndroidEngine::close_writable;
+        assert_eq!(crate::API_VERSION, 7);
+    }
+
+    #[test]
     fn directory_binary_contract_rejects_oversized_single_page() {
         let entry = smb_io_fs::DirectoryMetadataEntry {
             file_index: 0,
