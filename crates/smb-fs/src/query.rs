@@ -403,4 +403,76 @@ mod tests {
 
         assert!(decode_file_id_full_directory_information(&buffer).is_err());
     }
+    #[test]
+    fn decodes_file_id_full_metadata_with_unicode_and_raw_filetime() {
+        let name: Vec<u8> = "日本語.mkv"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let creation = 133_000_000_000_000_000u64;
+        let modified = 133_001_000_000_000_000u64;
+        let mut data = vec![0u8; 80 + name.len()];
+        data[4..8].copy_from_slice(&17u32.to_le_bytes());
+        data[8..16].copy_from_slice(&creation.to_le_bytes());
+        data[24..32].copy_from_slice(&modified.to_le_bytes());
+        data[40..48].copy_from_slice(&1234i64.to_le_bytes());
+        data[48..56].copy_from_slice(&4096i64.to_le_bytes());
+        data[56..60].copy_from_slice(&0x22u32.to_le_bytes());
+        data[60..64].copy_from_slice(&(name.len() as u32).to_le_bytes());
+        data[80..].copy_from_slice(&name);
+
+        let entries = decode_file_id_full_directory_metadata(&data).unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.name, "日本語.mkv");
+        assert_eq!(entry.file_index, 17);
+        assert_eq!(entry.end_of_file, 1234);
+        assert_eq!(entry.allocation_size, 4096);
+        assert_eq!(entry.creation_time, creation);
+        assert_eq!(entry.last_write_time, modified);
+        assert_eq!(entry.file_attributes, 0x22);
+    }
+
+    #[test]
+    fn metadata_rejects_negative_file_size_and_allocation() {
+        let mut data = [0u8; 80];
+        data[40..48].copy_from_slice(&(-1i64).to_le_bytes());
+        assert!(decode_file_id_full_directory_metadata(&data).is_err());
+
+        data[40..48].copy_from_slice(&0i64.to_le_bytes());
+        data[48..56].copy_from_slice(&(-1i64).to_le_bytes());
+        assert!(decode_file_id_full_directory_metadata(&data).is_err());
+    }
+
+    #[test]
+    fn metadata_rejects_truncated_fixed_header() {
+        let data = [0u8; 79];
+        assert!(decode_file_id_full_directory_metadata(&data).is_err());
+    }
+
+    #[test]
+    fn metadata_decodes_multiple_entries_with_aligned_offsets() {
+        let first_name: Vec<u8> = "one".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let second_name: Vec<u8> = "二番目".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let first_len = (80 + first_name.len() + 7) & !7;
+        let mut data = vec![0u8; first_len + 80 + second_name.len()];
+        data[0..4].copy_from_slice(&(first_len as u32).to_le_bytes());
+        data[40..48].copy_from_slice(&42i64.to_le_bytes());
+        data[60..64].copy_from_slice(&(first_name.len() as u32).to_le_bytes());
+        data[80..80 + first_name.len()].copy_from_slice(&first_name);
+        data[first_len + 40..first_len + 48].copy_from_slice(&7i64.to_le_bytes());
+        data[first_len + 56..first_len + 60].copy_from_slice(&0x10u32.to_le_bytes());
+        data[first_len + 60..first_len + 64]
+            .copy_from_slice(&(second_name.len() as u32).to_le_bytes());
+        data[first_len + 80..].copy_from_slice(&second_name);
+
+        let entries = decode_file_id_full_directory_metadata(&data).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "one");
+        assert_eq!(entries[0].end_of_file, 42);
+        assert_eq!(entries[1].name, "二番目");
+        assert_eq!(entries[1].file_attributes, 0x10);
+        assert_eq!(entries[1].end_of_file, 7);
+    }
+
 }
