@@ -87,10 +87,10 @@ pub use session_setup::{
 };
 pub use set_info::{
     FileDispositionInformation, FileDispositionInformationEx, FileEndOfFileInformation,
-    FileRenameInformation,
-    FileRenameInformationEx, SET_INFO_REQUEST_FIXED_SIZE, SET_INFO_REQUEST_STRUCTURE_SIZE,
-    SET_INFO_RESPONSE_FIXED_SIZE, SET_INFO_RESPONSE_STRUCTURE_SIZE, SetInfoRequest,
-    SetInfoResponse, disposition_flags, rename_flags, set_info_class,
+    FileRenameInformation, FileRenameInformationEx, SET_INFO_REQUEST_FIXED_SIZE,
+    SET_INFO_REQUEST_STRUCTURE_SIZE, SET_INFO_RESPONSE_FIXED_SIZE,
+    SET_INFO_RESPONSE_STRUCTURE_SIZE, SetInfoRequest, SetInfoResponse, disposition_flags,
+    rename_flags, set_info_class,
 };
 pub use tree_connect::{
     TREE_CONNECT_REQUEST_FIXED_SIZE, TREE_CONNECT_REQUEST_STRUCTURE_SIZE,
