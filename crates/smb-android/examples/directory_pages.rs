@@ -84,7 +84,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let size = engine.directory_size(handle)?;
         let expected = 1_200 + b"XFILES_PHASE6_QUERY".len() as i64 + b"SECOND_ENTRY".len() as i64;
         if size != expected {
-            return Err(format!("directory size mismatch: expected={expected}, actual={size}").into());
+            return Err(
+                format!("directory size mismatch: expected={expected}, actual={size}").into(),
+            );
         }
         println!("filesystem_capacity_verified: true");
         println!("directory_size_verified: true");
