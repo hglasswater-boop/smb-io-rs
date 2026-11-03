@@ -833,7 +833,7 @@ mod tests {
     }
     #[test]
     fn mkdir_contract_requires_new_jni_generation() {
-        assert_eq!(crate::API_VERSION, 5);
+        assert_eq!(crate::API_VERSION, 6);
     }
 
     #[test]
@@ -908,6 +908,21 @@ mod tests {
                     Err(AndroidBridgeError::InvalidConfig(_))
                 ),
                 "unsafe file delete path passed validation: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_file_rejects_unsafe_input_before_tcp() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in ["", "/absolute", r"\absolute", "../escape", "dot/./name", "null\0name"] {
+            let request = SmbMutationRequest::new("no-such-host.invalid", "media", path, "user", "secret");
+            assert!(
+                matches!(
+                    engine.create_file(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "unsafe create_file path accepted: {path:?}"
             );
         }
     }
