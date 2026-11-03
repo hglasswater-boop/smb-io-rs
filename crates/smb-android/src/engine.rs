@@ -1569,4 +1569,60 @@ mod tests {
         };
         assert!(encode_directory_metadata(&[entry]).is_err());
     }
+    #[test]
+    fn directory_size_skips_junctions_and_counts_only_file_eof() {
+        let entries = vec![
+            DirectoryMetadataEntry {
+                name: ".".into(), file_attributes: 0x10, end_of_file: 0,
+                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+            },
+            DirectoryMetadataEntry {
+                name: "folder".into(), file_attributes: 0x10, end_of_file: 0,
+                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+            },
+            DirectoryMetadataEntry {
+                name: "junction".into(), file_attributes: 0x410, end_of_file: 0,
+                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+            },
+            DirectoryMetadataEntry {
+                name: "movie.mkv".into(), file_attributes: 0, end_of_file: 22,
+                file_index: 0, allocation_size: 4_096, creation_time: 0, last_write_time: 0,
+            },
+        ];
+        let mut pending = Vec::new();
+        let mut total = 0u64;
+        accumulate_directory_entries(&entries, "video", &mut pending, &mut total);
+        assert_eq!(pending, vec!["video/folder"]);
+        assert_eq!(total, 22);
+    }
+
+    #[test]
+    fn directory_size_saturates_signed_java_long_and_prevents_traversal() {
+        let entries = vec![
+            DirectoryMetadataEntry {
+                name: "../outside".into(), file_attributes: 0x10, end_of_file: 0,
+                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+            },
+            DirectoryMetadataEntry {
+                name: "large.mkv".into(), file_attributes: 0, end_of_file: u64::MAX,
+                file_index: 0, allocation_size: 0, creation_time: 0, last_write_time: 0,
+            },
+        ];
+        let mut pending = Vec::new();
+        let mut total = 0u64;
+        accumulate_directory_entries(&entries, "", &mut pending, &mut total);
+        assert!(pending.is_empty());
+        assert_eq!(total, i64::MAX as u64);
+    }
+
+    #[test]
+    fn capacity_jni_contract_encodes_two_little_endian_longs() {
+        let bytes = encode_capacity_bytes(4096, 1024);
+        assert_eq!(&bytes[0..4], b"XSS1");
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(&bytes[4..12], &4096i64.to_le_bytes());
+        assert_eq!(&bytes[12..20], &1024i64.to_le_bytes());
+        assert_eq!(crate::API_VERSION, 9);
+    }
+
 }
