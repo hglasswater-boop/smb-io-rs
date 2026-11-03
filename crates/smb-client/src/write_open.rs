@@ -67,7 +67,10 @@ mod create_file_contract_tests {
             options.create_options & create_options::NON_DIRECTORY_FILE,
             0
         );
-        assert_eq!(options.share_access, share_access::READ | share_access::WRITE | share_access::DELETE);
+        assert_eq!(
+            options.share_access,
+            share_access::READ | share_access::WRITE | share_access::DELETE
+        );
     }
 
     #[test]
