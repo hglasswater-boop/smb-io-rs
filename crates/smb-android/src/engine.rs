@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
 use smb_io_client::{
-    ClientError, CloseInfo, CloseOptions, Connection, FileOpenOptions, NegotiateConfig,
+    ClientError, CloseInfo, CloseOptions, Connection, FileHandle, FileOpenOptions, NegotiateConfig, QueryDirectoryOptions,
     ReadOnlyReconnectRecipe, ReadReconnectPolicy, ReconnectError, SessionConnection,
     SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions, TreeHandle,
 };
-use smb_io_fs::{DirectoryMetadataEntry, FsMutationError, FsQueryError, read_directory_metadata};
+use smb_io_fs::{DirectoryMetadataEntry, FsMutationError, FsQueryError, decode_file_id_full_directory_metadata};
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
     recovering_video_broker_with_policy,
@@ -266,6 +266,39 @@ enum FileMutation {
 struct VideoSession {
     broker: VideoBrokerHandle,
 }
+/// Independent JNI handle type. The high bit below the sign bit keeps these handles distinct
+/// from the low-range video handles, while retaining positive Java Long values.
+const DIRECTORY_HANDLE_FLAG: u64 = 1u64 << 62;
+const FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS: u8 = 0x26;
+const DIRECTORY_QUERY_BUFFER_BYTES: u32 = 65_535;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryHandle(u64);
+
+impl DirectoryHandle {
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    fn table_key(self) -> Result<VideoHandle, AndroidBridgeError> {
+        if self.0 & DIRECTORY_HANDLE_FLAG == 0 || self.0 == DIRECTORY_HANDLE_FLAG {
+            return Err(AndroidBridgeError::InvalidConfig("invalid directory handle"));
+        }
+        Ok(VideoHandle::from_raw(self.0 & !DIRECTORY_HANDLE_FLAG))
+    }
+}
+
+struct DirectorySession {
+    session: SessionConnection<TcpTransport>,
+    directory: FileHandle,
+    exhausted: bool,
+}
+
 
 /// Long-lived runtime and opaque-handle owner for the Android/JNI adapter.
 ///
@@ -275,6 +308,7 @@ struct VideoSession {
 pub struct AndroidEngine {
     runtime: Runtime,
     videos: HandleTable<VideoSession>,
+    directories: HandleTable<Mutex<DirectorySession>>,
     max_read_bytes: usize,
     reconnect_policy: ReadReconnectPolicy,
 }
@@ -300,6 +334,7 @@ impl AndroidEngine {
         Ok(Self {
             runtime,
             videos: HandleTable::new(),
+            directories: HandleTable::new(),
             max_read_bytes: config.max_read_bytes,
             reconnect_policy: ReadReconnectPolicy {
                 max_connect_attempts: config.read_reconnect_attempts,
@@ -446,20 +481,65 @@ impl AndroidEngine {
         })
     }
 
-    /// Read-only metadata enumeration. Returns complete, bounded XFL1 payload or an error.
-    pub fn list_directory(&self, request: SmbMutationRequest) -> Result<Vec<u8>, AndroidBridgeError> {
+    /// Open one share-relative directory and retain the server's QUERY_DIRECTORY scan cursor.
+    pub fn open_directory(
+        &self,
+        request: SmbMutationRequest,
+    ) -> Result<DirectoryHandle, AndroidBridgeError> {
         validate_directory_request(&request)?;
-        self.runtime.block_on(async move {
+        let session = self.runtime.block_on(async move {
             let (mut session, tree, path) = connect_share(request).await?;
-            let dir = session
+            let directory = session
                 .open_file(&tree, &path, FileOpenOptions::read_existing_directory())
                 .await?;
-            let entries = read_directory_metadata(&mut session, &dir).await;
-            let closed = session.close_file(dir, CloseOptions::default()).await;
-            let entries = entries?;
-            closed?;
-            encode_directory_metadata(&entries)
-        })
+            Ok::<_, AndroidBridgeError>(DirectorySession {
+                session,
+                directory,
+                exhausted: false,
+            })
+        })?;
+        let id = self.directories.insert(Mutex::new(session))?;
+        Ok(DirectoryHandle(id.raw() | DIRECTORY_HANDLE_FLAG))
+    }
+
+    /// Return exactly one server QUERY_DIRECTORY page, or an XFL1 zero-count EOF page.
+    /// Pages are independent of total folder size and never restart the remote scan.
+    pub fn read_directory_page(
+        &self,
+        handle: DirectoryHandle,
+    ) -> Result<Vec<u8>, AndroidBridgeError> {
+        let entry = self.directories.get(handle.table_key()?)?;
+        let mut state = lock(&entry)?;
+        if state.exhausted {
+            return encode_directory_metadata(&[]);
+        }
+        let DirectorySession {
+            session,
+            directory,
+            exhausted,
+        } = &mut *state;
+        let options = QueryDirectoryOptions::new(
+            FILE_ID_FULL_DIRECTORY_INFORMATION_CLASS,
+            "*",
+            DIRECTORY_QUERY_BUFFER_BYTES,
+        );
+        let buffer = self.runtime.block_on(session.query_directory(directory, options))?;
+        if buffer.is_empty() {
+            *exhausted = true;
+            return encode_directory_metadata(&[]);
+        }
+        let entries = decode_file_id_full_directory_metadata(&buffer)?;
+        encode_directory_metadata(&entries)
+    }
+
+    /// Remove the handle and close the SMB directory. A later read cannot resurrect its cursor.
+    pub fn close_directory(&self, handle: DirectoryHandle) -> Result<(), AndroidBridgeError> {
+        let entry = self.directories.remove(handle.table_key()?)?;
+        let state = lock(&entry)?;
+        self.runtime
+            .block_on(state.session.close_file(state.directory.clone(), CloseOptions::default()))
+            .map(|_| ())
+            .map_err(AndroidBridgeError::from)
     }
 
     fn validate_read_length(&self, length: usize) -> Result<(), AndroidBridgeError> {
