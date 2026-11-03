@@ -8,8 +8,8 @@ use smb_io_client::{
     SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions, TreeHandle,
 };
 use smb_io_fs::{
-    FsMutationError, delete_directory, delete_file, mkdir, query_standard_information,
-    read_directory_names, rename,
+    FsMutationError, create_file as create_empty_file, delete_directory, delete_file, mkdir,
+    query_standard_information, read_directory_names, rename,
 };
 
 #[tokio::main]
@@ -47,6 +47,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     require_name(&mut session, &tree, "", &root, true).await?;
     require_standard_info(&mut session, &tree, &root, true).await?;
     println!("mkdir_verified: true");
+
+    let empty = format!("{root}\\exclusive-新規.txt");
+    create_empty_file(&mut session, &tree, &empty).await?;
+    let created = session
+        .open_file(&tree, &empty, FileOpenOptions::read_existing_random())
+        .await?;
+    if created.len() != 0 {
+        return Err("FILE_CREATE did not produce a zero-length file".into());
+    }
+    session.close_file(created, CloseOptions::default()).await?;
+    match create_empty_file(&mut session, &tree, &empty).await {
+        Err(FsMutationError::AlreadyExists) => {}
+        other => return Err(format!("expected FILE_CREATE collision, got {other:?}").into()),
+    }
+    let original = session
+        .open_file(&tree, &empty, FileOpenOptions::read_existing_random())
+        .await?;
+    if original.len() != 0 {
+        return Err("colliding FILE_CREATE modified existing file".into());
+    }
+    session.close_file(original, CloseOptions::default()).await?;
+    delete_file(&mut session, &tree, &empty).await?;
+    println!("exclusive_create_file_verified: true");
 
     let source = format!("{root}\\source.txt");
     create_file(&mut session, &tree, &source, b"phase9-source").await?;
