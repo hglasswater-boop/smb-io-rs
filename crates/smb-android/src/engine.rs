@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use smb_io_auth::{AnonymousNtlmProvider, NtlmCredentials, NtlmV2Provider};
-use smb_io_fs::FsMutationError;
 use smb_io_client::{
-    ClientError, CloseInfo, Connection, NegotiateConfig, ReadOnlyReconnectRecipe, ReadReconnectPolicy,
-    ReconnectError, SessionSetupConfig, TcpTransport, TcpTransportConfig, TreeConnectOptions,
+    ClientError, CloseInfo, Connection, NegotiateConfig, ReadOnlyReconnectRecipe,
+    ReadReconnectPolicy, ReconnectError, SessionSetupConfig, TcpTransport, TcpTransportConfig,
+    TreeConnectOptions,
 };
+use smb_io_fs::FsMutationError;
 use smb_io_stream::{
     BrokerError, StreamError, VideoBrokerConfig, VideoBrokerHandle, VideoReaderConfig,
     recovering_video_broker_with_policy,
@@ -384,7 +385,6 @@ impl AndroidEngine {
             .map_err(map_broker_error)
     }
 
-
     /// Creates one directory. No mutation is replayed after a transport failure.
     ///
     /// Connection reuse across operations is a later phase. Keep the temporary single-operation
@@ -470,7 +470,9 @@ fn validate_mkdir_request(request: &SmbMutationRequest) -> Result<(), AndroidBri
         ));
     }
     if request.port == 0 {
-        return Err(AndroidBridgeError::InvalidConfig("port must be greater than zero"));
+        return Err(AndroidBridgeError::InvalidConfig(
+            "port must be greater than zero",
+        ));
     }
     if request.share.is_empty() || request.share.contains(['\\', '/', '\0']) {
         return Err(AndroidBridgeError::InvalidConfig(
@@ -481,7 +483,11 @@ fn validate_mkdir_request(request: &SmbMutationRequest) -> Result<(), AndroidBri
         || request.path.starts_with('\\')
         || request.path.starts_with('/')
         || request.path.contains('\0')
-        || request.path.replace('\\', "/").split('/').any(|component| component == "." || component == "..")
+        || request
+            .path
+            .replace('\\', "/")
+            .split('/')
+            .any(|component| component == "." || component == "..")
     {
         return Err(AndroidBridgeError::InvalidConfig(
             "mkdir path must be a non-empty share-relative path without dot components or NUL",
@@ -615,15 +621,28 @@ mod tests {
 
     #[test]
     fn mkdir_contract_rejects_unsafe_paths_before_connect() {
-        for path in ["", "/absolute", r"\absolute", "../escape", "./name", "parent/../name", r"dir\..\name", "bad\0name"] {
+        for path in [
+            "",
+            "/absolute",
+            r"\absolute",
+            "../escape",
+            "./name",
+            "parent/../name",
+            r"dir\..\name",
+            "bad\0name",
+        ] {
             let request = SmbMutationRequest::new("nas.local", "media", path, "user", "password");
-            assert!(validate_mkdir_request(&request).is_err(), "accepted invalid path: {path:?}");
+            assert!(
+                validate_mkdir_request(&request).is_err(),
+                "accepted invalid path: {path:?}"
+            );
         }
     }
 
     #[test]
     fn mkdir_contract_validates_connection_and_accepts_unicode_relative_path() {
-        let mut request = SmbMutationRequest::new("nas.local", "media", "folder/日本語", "user", "password");
+        let mut request =
+            SmbMutationRequest::new("nas.local", "media", "folder/日本語", "user", "password");
         assert!(validate_mkdir_request(&request).is_ok());
         request.port = 0;
         assert!(validate_mkdir_request(&request).is_err());
