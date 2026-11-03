@@ -14,8 +14,8 @@ use jni::sys::{jbyte, jint, jlong};
 use jni::{Env, EnvUnowned, jni_mangle, jni_str};
 
 use crate::{
-    API_VERSION, AndroidEngine, AndroidEngineConfig, DirectoryHandle, SmbMutationRequest,
-    RandomHandle, VideoHandle, VideoOpenRequest, WritableHandle,
+    API_VERSION, AndroidEngine, AndroidEngineConfig, DirectoryHandle, RandomHandle,
+    SmbMutationRequest, VideoHandle, VideoOpenRequest, WritableHandle,
 };
 
 static ENGINE: OnceLock<Result<AndroidEngine, String>> = OnceLock::new();
@@ -421,8 +421,17 @@ pub fn native_open_random<'local>(
     unowned_env
         .with_env(|env| -> JniResult<jlong> {
             let Some(request) = mutation_request(
-                env, &host, port, &share, &path, &username, &password, &domain, &workstation,
-            )? else {
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
                 return Ok(0);
             };
             let engine = match engine() {
@@ -451,7 +460,10 @@ pub fn native_read_random_at<'local>(
     unowned_env
         .with_env(|env| -> JniResult<jint> {
             if handle <= 0 || position < 0 {
-                return throw_argument(env, "random SMB handle and read position must be nonnegative");
+                return throw_argument(
+                    env,
+                    "random SMB handle and read position must be nonnegative",
+                );
             }
             if destination_offset < 0 || length < 0 || length > 1024 * 1024 {
                 return throw_argument(env, "random SMB read range invalid or exceeds 1 MiB");
@@ -501,7 +513,10 @@ pub fn native_write_random_at<'local>(
     unowned_env
         .with_env(|env| -> JniResult<jint> {
             if handle <= 0 || position < 0 {
-                return throw_argument(env, "random SMB handle and write position must be nonnegative");
+                return throw_argument(
+                    env,
+                    "random SMB handle and write position must be nonnegative",
+                );
             }
             if source_offset < 0 || length < 0 || length > 1024 * 1024 {
                 return throw_argument(env, "random SMB write range invalid or exceeds 1 MiB");
@@ -548,7 +563,10 @@ pub fn native_set_random_length<'local>(
     unowned_env
         .with_env(|env| -> JniResult<()> {
             if handle <= 0 || length < 0 {
-                return throw_argument(env, "random SMB handle must be positive and length nonnegative");
+                return throw_argument(
+                    env,
+                    "random SMB handle must be positive and length nonnegative",
+                );
             }
             let engine = match engine() {
                 Ok(engine) => engine,
