@@ -752,4 +752,70 @@ mod tests {
         assert!(validate_mutation_path(r"root\ファイル.txt").is_ok());
         assert!(validate_mutation_path("valid-name.txt").is_ok());
     }
+    #[test]
+    fn directory_query_rejects_unsafe_paths_without_network_access() {
+        let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
+        for path in ["/absolute", r"\absolute", "../parent", "./dot", r"foo\..\bar", "nul\0name"] {
+            let request = SmbMutationRequest::new("no-such-host.invalid", "files", path, "", "");
+            assert!(
+                matches!(
+                    engine.list_directory(request),
+                    Err(AndroidBridgeError::InvalidConfig(_))
+                ),
+                "accepted unsafe directory path: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_root_is_valid_and_unicode_relative_paths_are_unchanged() {
+        let root = SmbMutationRequest::new("nas.local", "files", "", "", "");
+        assert!(validate_directory_request(&root).is_ok());
+        let unicode = SmbMutationRequest::new("nas.local", "files", "root/映画", "user", "secret");
+        assert!(validate_directory_request(&unicode).is_ok());
+    }
+
+    #[test]
+    fn directory_binary_contract_encodes_unicode_name_and_metadata() {
+        let entry = smb_io_fs::DirectoryMetadataEntry {
+            file_index: 3,
+            name: "映画\t一.mkv".to_string(),
+            file_attributes: 0x22,
+            end_of_file: 123,
+            allocation_size: 4096,
+            creation_time: 133_000_000_000_000_000,
+            last_write_time: 133_001_000_000_000_000,
+        };
+        let bytes = encode_directory_metadata(&[entry]).unwrap();
+        assert_eq!(&bytes[0..4], b"XFL1");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
+        let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[12..12 + length], "映画\t一.mkv".as_bytes());
+        let pos = 12 + length;
+        assert_eq!(u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()), 0x22);
+        assert_eq!(u64::from_le_bytes(bytes[pos + 4..pos + 12].try_into().unwrap()), 123);
+        assert_eq!(u64::from_le_bytes(bytes[pos + 12..pos + 20].try_into().unwrap()), 133_000_000_000_000_000);
+        assert_eq!(u64::from_le_bytes(bytes[pos + 20..pos + 28].try_into().unwrap()), 133_001_000_000_000_000);
+        assert_eq!(bytes.len(), pos + 28);
+    }
+
+    #[test]
+    fn directory_binary_contract_reports_empty_directory_with_header() {
+        assert_eq!(encode_directory_metadata(&[]).unwrap(), b"XFL1\0\0\0\0");
+    }
+
+    #[test]
+    fn directory_binary_contract_rejects_over_maximum_size() {
+        let entry = smb_io_fs::DirectoryMetadataEntry {
+            file_index: 0,
+            name: "a".repeat(MAX_DIRECTORY_RESULT_BYTES),
+            file_attributes: 0,
+            end_of_file: 0,
+            allocation_size: 0,
+            creation_time: 0,
+            last_write_time: 0,
+        };
+        assert!(encode_directory_metadata(&[entry]).is_err());
+    }
+
 }
