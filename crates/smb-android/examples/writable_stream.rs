@@ -4,9 +4,7 @@
 use std::error::Error;
 use std::time::Instant;
 
-use smb_io_android::{
-    AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoOpenRequest,
-};
+use smb_io_android::{AndroidEngine, AndroidEngineConfig, SmbMutationRequest, VideoOpenRequest};
 
 const CHUNK: usize = 1024 * 1024;
 const TOTAL: usize = 3 * CHUNK + 17;
@@ -24,13 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let engine = AndroidEngine::new(AndroidEngineConfig::default())?;
-    let mut open = SmbMutationRequest::new(
-        &host,
-        &share,
-        &path,
-        &username,
-        &password,
-    );
+    let mut open = SmbMutationRequest::new(&host, &share, &path, &username, &password);
     open.port = port;
     let writer = engine.open_writable(open)?;
     let expected: Vec<u8> = (0..TOTAL)
@@ -65,13 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("closed writable handle unexpectedly allowed writes".into());
     }
 
-    let mut request = VideoOpenRequest::new(
-        &host,
-        &share,
-        &path,
-        &username,
-        &password,
-    );
+    let mut request = VideoOpenRequest::new(&host, &share, &path, &username, &password);
     request.port = port;
     let reader = engine.open_video(request)?;
     let result = (|| -> Result<(), Box<dyn Error>> {
