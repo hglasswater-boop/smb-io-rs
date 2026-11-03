@@ -7,13 +7,18 @@ fn eof_file_info_class_is_file_end_of_file_information() {
 
 #[test]
 fn eof_information_encodes_exactly_eight_signed_le_bytes() {
-    assert_eq!(FileEndOfFileInformation::new(0).unwrap().encode(), 0i64.to_le_bytes());
+    assert_eq!(
+        FileEndOfFileInformation::new(0).unwrap().encode(),
+        0i64.to_le_bytes()
+    );
     assert_eq!(
         FileEndOfFileInformation::new(0x1234_5678).unwrap().encode(),
         0x1234_5678i64.to_le_bytes()
     );
     assert_eq!(
-        FileEndOfFileInformation::new(i64::MAX as u64).unwrap().encode(),
+        FileEndOfFileInformation::new(i64::MAX as u64)
+            .unwrap()
+            .encode(),
         i64::MAX.to_le_bytes()
     );
 }
