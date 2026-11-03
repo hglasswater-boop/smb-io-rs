@@ -1173,7 +1173,7 @@ mod tests {
     }
     #[test]
     fn legacy_mutation_contract_is_retained_in_jni_v7() {
-        assert_eq!(crate::API_VERSION, 7);
+        assert_eq!(crate::API_VERSION, 8);
     }
 
     #[test]
@@ -1445,7 +1445,7 @@ mod tests {
             AndroidEngine::flush_writable;
         let _close: fn(&AndroidEngine, WritableHandle) -> Result<(), AndroidBridgeError> =
             AndroidEngine::close_writable;
-        assert_eq!(crate::API_VERSION, 7);
+        assert_eq!(crate::API_VERSION, 8);
     }
 
     #[test]
