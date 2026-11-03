@@ -11,5 +11,5 @@ pub use engine::{
     SmbMutationRequest, VideoHandle, VideoOpenRequest, WritableHandle,
 };
 
-/// Android bridge API generation for video, mutations and read-only directory metadata.
-pub const API_VERSION: u32 = 8;
+/// Android bridge API generation for video, mutations, metadata, capacity and directory size.
+pub const API_VERSION: u32 = 9;
