@@ -924,8 +924,16 @@ mod tests {
     #[test]
     fn create_file_rejects_unsafe_input_before_tcp() {
         let engine = AndroidEngine::new(AndroidEngineConfig::default()).unwrap();
-        for path in ["", "/absolute", r"\absolute", "../escape", "dot/./name", "null\0name"] {
-            let request = SmbMutationRequest::new("no-such-host.invalid", "media", path, "user", "secret");
+        for path in [
+            "",
+            "/absolute",
+            r"\absolute",
+            "../escape",
+            "dot/./name",
+            "null\0name",
+        ] {
+            let request =
+                SmbMutationRequest::new("no-such-host.invalid", "media", path, "user", "secret");
             assert!(
                 matches!(
                     engine.create_file(request),
