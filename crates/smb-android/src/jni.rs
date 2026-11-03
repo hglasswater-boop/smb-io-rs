@@ -298,6 +298,49 @@ pub fn native_mkdir<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Creates one new empty regular file. Never overwrites or replays an ambiguous CREATE.
+#[allow(clippy::too_many_arguments)]
+#[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]
+pub fn native_create_file<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    host: JString<'local>,
+    port: jint,
+    share: JString<'local>,
+    path: JString<'local>,
+    username: JString<'local>,
+    password: JString<'local>,
+    domain: JString<'local>,
+    workstation: JString<'local>,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            let Some(request) = mutation_request(
+                env,
+                &host,
+                port,
+                &share,
+                &path,
+                &username,
+                &password,
+                &domain,
+                &workstation,
+            )?
+            else {
+                return Ok(());
+            };
+            let engine = match engine() {
+                Ok(engine) => engine,
+                Err(error) => return throw_io(env, error),
+            };
+            match engine.create_file(request) {
+                Ok(()) => Ok(()),
+                Err(error) => throw_io(env, error),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Renames one entry inside its connected share, with no replace or retry.
 #[allow(clippy::too_many_arguments)]
 #[jni_mangle("app.local1st.files.core.fs.rust.RustSmbNative")]

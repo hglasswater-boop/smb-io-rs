@@ -75,6 +75,7 @@ jobs:
             127.0.0.1 "$SMB_PORT" auth phase9 "$SMB_USER" "$SMB_PASSWORD" \
             2>&1 | tee /tmp/phase9.log
           grep -q '^mkdir_verified: true$' /tmp/phase9.log
+          grep -q '^exclusive_create_file_verified: true$' /tmp/phase9.log
           grep -q '^unicode_rename_verified: true$' /tmp/phase9.log
           grep -q '^collision_verified: true$' /tmp/phase9.log
           grep -q '^replace_existing_verified: true$' /tmp/phase9.log
