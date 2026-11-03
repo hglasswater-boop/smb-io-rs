@@ -103,7 +103,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let opened = request(&host, port, &share, &path, &user, &pass);
     let handle = engine.open_random(opened)?;
     let result = (|| -> Result<(), Box<dyn Error>> {
-        if engine.read_random_at(handle, 0, SHRUNK_BYTES)? != pattern[..SHRUNK_BYTES] {
+        if engine.read_random_at(handle, 0, MIB)? != pattern[..MIB]
+            || engine.read_random_at(handle, MIB as u64, SHRUNK_BYTES - MIB)?
+                != pattern[MIB..SHRUNK_BYTES]
+        {
             return Err("reopen lost the retained prefix".into());
         }
         if engine.read_random_at(handle, (EXTENDED_BYTES - 2) as u64, 2)? != b"OK" {
