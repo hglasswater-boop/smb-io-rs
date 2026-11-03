@@ -744,7 +744,7 @@ mod tests {
     }
     #[test]
     fn mkdir_contract_requires_new_jni_generation() {
-        assert_eq!(crate::API_VERSION, 4);
+        assert_eq!(crate::API_VERSION, 5);
     }
 
     #[test]
