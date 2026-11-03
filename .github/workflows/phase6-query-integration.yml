@@ -101,44 +101,8 @@ jobs:
           fi
           grep -q '^query_info_verified: true$' /tmp/phase6-query.log
           grep -q '^directory_root_open_verified: true$' /tmp/phase6-query.log
-          grep -q '^query_directory_verified: true
-
-      - name: Collect diagnostics
-        if: always()
-        run: |
-          mkdir -p /tmp/phase6-diagnostics
-          cp /tmp/phase6-query.log /tmp/phase6-diagnostics/phase6-query.log 2>/dev/null || true
-          sudo cp /tmp/smb-phase6.log /tmp/phase6-diagnostics/smb-phase6.log 2>/dev/null || true
-          sudo chown -R "$(id -u):$(id -g)" /tmp/phase6-diagnostics
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          retention-days: 7
-          name: phase6-query-diagnostics
-          path: /tmp/phase6-diagnostics
-          if-no-files-found: warn
- /tmp/phase6-query.log
-          grep -q '^directory_metadata_verified: true
-
-      - name: Collect diagnostics
-        if: always()
-        run: |
-          mkdir -p /tmp/phase6-diagnostics
-          cp /tmp/phase6-query.log /tmp/phase6-diagnostics/phase6-query.log 2>/dev/null || true
-          sudo cp /tmp/smb-phase6.log /tmp/phase6-diagnostics/smb-phase6.log 2>/dev/null || true
-          sudo chown -R "$(id -u):$(id -g)" /tmp/phase6-diagnostics
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          retention-days: 7
-          name: phase6-query-diagnostics
-          path: /tmp/phase6-diagnostics
-          if-no-files-found: warn
- /tmp/phase6-query.log
+          grep -q '^query_directory_verified: true$' /tmp/phase6-query.log
+          grep -q '^directory_metadata_verified: true$' /tmp/phase6-query.log
 
       - name: Collect diagnostics
         if: always()
