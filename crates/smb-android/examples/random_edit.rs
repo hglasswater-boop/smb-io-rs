@@ -12,7 +12,14 @@ const PATTERN_BYTES: usize = 2 * MIB + 17;
 const SHRUNK_BYTES: usize = MIB + 11;
 const EXTENDED_BYTES: usize = 3 * MIB + 17;
 
-fn request(host: &str, port: u16, share: &str, path: &str, user: &str, pass: &str) -> SmbMutationRequest {
+fn request(
+    host: &str,
+    port: u16,
+    share: &str,
+    path: &str,
+    user: &str,
+    pass: &str,
+) -> SmbMutationRequest {
     let mut request = SmbMutationRequest::new(host, share, path, user, pass);
     request.port = port;
     request
@@ -30,7 +37,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("unexpected argument".into());
     }
     let engine = AndroidEngine::new(AndroidEngineConfig::default())?;
-    let missing = request(&host, port, &share, "missing-random-v8-not-created.bin", &user, &pass);
+    let missing = request(
+        &host,
+        port,
+        &share,
+        "missing-random-v8-not-created.bin",
+        &user,
+        &pass,
+    );
     if let Ok(handle) = engine.open_random(missing) {
         let _ = engine.close_random(handle);
         return Err("FILE_OPEN unexpectedly created a missing file".into());
@@ -63,10 +77,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("random_positional_roundtrip_verified: true");
 
         engine.set_random_length(handle, SHRUNK_BYTES as u64)?;
-        if !engine.read_random_at(handle, SHRUNK_BYTES as u64, 1)?.is_empty() {
+        if !engine
+            .read_random_at(handle, SHRUNK_BYTES as u64, 1)?
+            .is_empty()
+        {
             return Err("random SET_INFO shrink did not refresh cached EOF".into());
         }
-        if engine.read_random_at(handle, (SHRUNK_BYTES - 1) as u64, 1)? != [pattern[SHRUNK_BYTES - 1]] {
+        if engine.read_random_at(handle, (SHRUNK_BYTES - 1) as u64, 1)?
+            != [pattern[SHRUNK_BYTES - 1]]
+        {
             return Err("random shrink damaged the retained prefix".into());
         }
         println!("random_shrink_cached_eof_verified: true");
@@ -75,7 +94,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         if engine.read_random_at(handle, (EXTENDED_BYTES - 1) as u64, 1)? != [0u8] {
             return Err("random extension did not expose zero-filled data on same handle".into());
         }
-        if engine.read_random_at(handle, SHRUNK_BYTES as u64, MIB)?
+        if engine
+            .read_random_at(handle, SHRUNK_BYTES as u64, MIB)?
             .iter()
             .any(|&byte| byte != 0)
         {
@@ -112,7 +132,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         if engine.read_random_at(handle, (EXTENDED_BYTES - 2) as u64, 2)? != b"OK" {
             return Err("reopen lost flushed trailer".into());
         }
-        if !engine.read_random_at(handle, EXTENDED_BYTES as u64, 1)?.is_empty() {
+        if !engine
+            .read_random_at(handle, EXTENDED_BYTES as u64, 1)?
+            .is_empty()
+        {
             return Err("reopen returned bytes past final EOF".into());
         }
         Ok(())
