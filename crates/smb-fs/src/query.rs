@@ -58,7 +58,9 @@ pub struct FileFsFullSizeInformation {
 impl FileFsFullSizeInformation {
     pub fn decode(buffer: &[u8]) -> Result<Self, FsQueryError> {
         if buffer.len() != 32 {
-            return Err(FsQueryError::InvalidData("FileFsFullSizeInformation must be 32 bytes"));
+            return Err(FsQueryError::InvalidData(
+                "FileFsFullSizeInformation must be 32 bytes",
+            ));
         }
         let total = i64::from_le_bytes(buffer[0..8].try_into().expect("fixed slice"));
         let caller = i64::from_le_bytes(buffer[8..16].try_into().expect("fixed slice"));
@@ -66,7 +68,9 @@ impl FileFsFullSizeInformation {
         let sectors = u32::from_le_bytes(buffer[24..28].try_into().expect("fixed slice"));
         let bytes = u32::from_le_bytes(buffer[28..32].try_into().expect("fixed slice"));
         if total < 0 || caller < 0 || actual < 0 || sectors == 0 || bytes == 0 {
-            return Err(FsQueryError::InvalidData("invalid FileFsFullSizeInformation units"));
+            return Err(FsQueryError::InvalidData(
+                "invalid FileFsFullSizeInformation units",
+            ));
         }
         Ok(Self {
             total_units: total as u64,
@@ -79,10 +83,12 @@ impl FileFsFullSizeInformation {
     /// Java longs cannot represent capacities > i64::MAX; saturate instead of wrapping.
     pub fn capacity_bytes(self) -> (i64, i64) {
         let bytes_per_unit = u128::from(self.sectors_per_unit) * u128::from(self.bytes_per_sector);
-        let to_java = |units: u64| {
-            (u128::from(units) * bytes_per_unit).min(i64::MAX as u128) as i64
-        };
-        (to_java(self.total_units), to_java(self.caller_available_units))
+        let to_java =
+            |units: u64| (u128::from(units) * bytes_per_unit).min(i64::MAX as u128) as i64;
+        (
+            to_java(self.total_units),
+            to_java(self.caller_available_units),
+        )
     }
 }
 
@@ -602,7 +608,8 @@ mod tests {
 
     #[test]
     fn full_size_information_uses_caller_available_for_quota_aware_free_space() {
-        let info = FileFsFullSizeInformation::decode(&full_size_bytes(1000, 20, 300, 8, 512)).unwrap();
+        let info =
+            FileFsFullSizeInformation::decode(&full_size_bytes(1000, 20, 300, 8, 512)).unwrap();
         assert_eq!(info.capacity_bytes(), (4_096_000, 81_920));
     }
 
@@ -618,8 +625,14 @@ mod tests {
 
     #[test]
     fn full_size_information_saturates_java_long_capacity() {
-        let info = FileFsFullSizeInformation::decode(&full_size_bytes(i64::MAX, i64::MAX, i64::MAX, u32::MAX, u32::MAX)).unwrap();
+        let info = FileFsFullSizeInformation::decode(&full_size_bytes(
+            i64::MAX,
+            i64::MAX,
+            i64::MAX,
+            u32::MAX,
+            u32::MAX,
+        ))
+        .unwrap();
         assert_eq!(info.capacity_bytes(), (i64::MAX, i64::MAX));
     }
-
 }
